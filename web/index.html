@@ -185,6 +185,13 @@
     main { grid-template-columns: minmax(0, 1fr); }
     .hero { font-size: 30px; }
     .system-card { flex-direction: column; align-items: flex-start; gap: 14px; }
+    /* process rows become two lines: identity on top, metrics below */
+    .proc-grid, .child-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 16px; }
+    .proc-id { flex: 1 1 100%; }
+    .col-mem { margin-left: auto; }
+    .proc-grid.head { row-gap: 2px; }
+    .proc-grid.head .sort-btn[data-sort="name"] { flex: 1 1 100%; }
+    .child-row { padding-left: 24px; }
   }
   footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
 </style>
@@ -610,7 +617,7 @@
       <div class="proc-id" style="gap:9px"><span class="n">${esc(c.name)}</span><span class="pid">pid ${c.pid}</span></div>
       <span class="cell-dim col-time">${fmtRun(c.uptime_secs)}</span>
       <span class="cell-dim">${c.cpu_pct.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
-      <span class="cell-dim">${fmtMem(c.mem_bytes)}</span>
+      <span class="cell-dim col-mem">${fmtMem(c.mem_bytes)}</span>
       <span class="cell-dim col-disk">${fmtDisk(c.disk_bps)}</span>
     </div>`;
   }
@@ -651,7 +658,7 @@
             <span class="cell-num">${p.cpu_pct.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
             <div class="mini-track"><div class="mini-fill" style="width:${Math.min((p.cpu_pct / maxCpu) * 100, 100)}%"></div></div>
           </div>
-          <span class="cell-num">${fmtMem(p.mem_bytes)}</span>
+          <span class="cell-num col-mem">${fmtMem(p.mem_bytes)}</span>
           <span class="cell-dim col-disk">${fmtDisk(p.disk_bps)}</span>
         </div>
         ${children}

@@ -32,6 +32,7 @@ async fn main() {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/history", get(history))
+        .route("/api/v1/processes", get(processes))
         .route("/api/v1/system", get(system))
         .with_state(state);
 
@@ -50,6 +51,14 @@ async fn snapshot(AxumState(state): AxumState<Shared>) -> impl IntoResponse {
 
 async fn system(AxumState(state): AxumState<Shared>) -> impl IntoResponse {
     Json(state.read().await.system.clone())
+}
+
+async fn processes(AxumState(state): AxumState<Shared>) -> impl IntoResponse {
+    let st = state.read().await;
+    Json(serde_json::json!({
+        "total": st.snapshot.processes,
+        "processes": st.processes,
+    }))
 }
 
 #[derive(Deserialize)]

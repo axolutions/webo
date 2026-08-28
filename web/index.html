@@ -82,7 +82,7 @@
   }
   .icon-btn:hover { color: var(--text); border-color: var(--stroke-strong); }
   .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 26px; }
+  main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
   .stat-card {
     display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; border-radius: 15px;
     background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh);
@@ -116,6 +116,49 @@
   .spark { display: block; width: 100%; height: 56px; }
   .net-heroes { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .net-item { display: flex; align-items: baseline; gap: 5px; }
+  .tabs-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+  .seg { display: flex; gap: 3px; padding: 3px; border-radius: 12px; background: var(--surface-3); width: fit-content; }
+  .seg-btn {
+    height: 32px; padding: 0 13px; border: 0; border-radius: 9px; background: transparent;
+    color: var(--text-2); font-weight: 500; font-size: 13px; white-space: nowrap; font-family: inherit; cursor: pointer;
+  }
+  .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .seg-btn.on { background: var(--accent); color: #fff; font-weight: 600; box-shadow: 0 6px 14px -8px var(--accent); }
+  .search-box {
+    display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 12px; width: 260px; max-width: 100%;
+    border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2);
+  }
+  .search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .search-box svg { color: var(--text-3); flex: none; }
+  .search-box input { flex: 1; min-width: 0; border: 0; background: transparent; font: inherit; font-size: 13.5px; color: var(--text); outline: none; }
+  .search-box input::placeholder { color: var(--text-3); }
+  #view-processes { margin-top: 18px; }
+  .proc-card {
+    border-radius: 15px; background: var(--card); border: 1px solid var(--stroke);
+    box-shadow: var(--sh); backdrop-filter: blur(14px); overflow: hidden;
+  }
+  .proc-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px 140px 100px 90px; gap: 14px; align-items: center; padding: 13px 22px; }
+  .proc-grid.head { padding: 14px 22px; border-bottom: 1px solid var(--stroke); }
+  .proc-row { border-top: 1px solid var(--stroke); }
+  .proc-row:first-of-type { border-top: 0; }
+  .proc-id { display: flex; align-items: center; gap: 13px; min-width: 0; }
+  .proc-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; flex: none; }
+  .proc-names { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .proc-title { display: flex; align-items: baseline; gap: 8px; }
+  .proc-title .n { font-weight: 600; }
+  .proc-title .t { font-size: 12px; color: var(--text-3); }
+  .proc-cmd { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell-num { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13.5px; }
+  .cell-dim { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .cpu-cell { display: flex; align-items: center; gap: 10px; }
+  .mini-track { width: 56px; height: 5px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+  .mini-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .proc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 22px; border-top: 1px solid var(--stroke); font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
+  @media (max-width: 900px) {
+    .proc-grid { grid-template-columns: minmax(0, 1fr) 110px 90px; }
+    .proc-grid .col-time, .proc-grid .col-disk { display: none; }
+    .proc-cmd { display: none; }
+  }
   footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
   footer a { color: var(--accent); text-decoration: none; }
   @media (max-width: 900px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -146,7 +189,18 @@
     </div>
   </header>
 
-  <main>
+  <div class="tabs-row">
+    <div class="seg" role="tablist">
+      <button class="seg-btn on" id="tab-overview" role="tab">Visão geral</button>
+      <button class="seg-btn" id="tab-processes" role="tab">Processos</button>
+    </div>
+    <div class="search-box" id="proc-search-box" hidden>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20 L16.5 16.5"></path></svg>
+      <input id="proc-search" type="search" placeholder="buscar processo…" autocomplete="off">
+    </div>
+  </div>
+
+  <main id="view-overview" style="margin-top: 18px;">
     <section class="stat-card">
       <div class="card-head"><span class="label">CPU</span><span class="mono-badge" id="cpu-brand">—</span></div>
       <div class="hero-row">
@@ -227,6 +281,22 @@
       <div class="kv"><span class="label">Webo</span><span class="v mono" id="sys-version">—</span></div>
     </section>
   </main>
+
+  <section id="view-processes" hidden>
+    <div class="proc-card">
+      <div class="proc-grid head">
+        <span class="label" id="proc-head">Os que mais consomem</span>
+        <span class="label col-time">Rodando há</span>
+        <span class="label">CPU</span>
+        <span class="label">Memória</span>
+        <span class="label col-disk">Disco</span>
+      </div>
+      <div id="proc-rows"></div>
+      <div class="proc-foot">
+        <span id="proc-foot-txt">carregando…</span>
+      </div>
+    </div>
+  </section>
 
   <footer>webo · painel de saúde self-hosted</footer>
 </div>
@@ -389,10 +459,112 @@
     try { renderHistory(await (await fetch("/api/v1/history")).json()); } catch {}
   }
 
+  // ---------- aba Processos ----------
+  const KINDS = {
+    node:       { label: "Node.js",           color: "#3fca7c", icon: '<path d="M12 2.8 L20 7.4 L20 16.6 L12 21.2 L4 16.6 L4 7.4 Z"></path>' },
+    postgres:   { label: "PostgreSQL",        color: "#38bdf8", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
+    docker:     { label: "Docker",            color: "#4f8bff", icon: '<path d="M12 3 L20 7.5 L20 16.5 L12 21 L4 16.5 L4 7.5 Z"></path><path d="M4 7.5 L12 12 L20 7.5"></path><path d="M12 12 L12 21"></path>' },
+    cloudflare: { label: "Cloudflare Tunnel", color: "#eab308", icon: '<path d="M7 18a4.5 4.5 0 1 1 .6-8.96 6 6 0 0 1 11.4 1.8A3.6 3.6 0 0 1 18.4 18Z"></path>' },
+    redis:      { label: "Redis",             color: "#e5484d", icon: '<path d="M4 8.5 L12 5 L20 8.5 L12 12 Z"></path><path d="M4 12 L12 15.5 L20 12"></path><path d="M4 15.5 L12 19 L20 15.5"></path>' },
+    python:     { label: "Python",            color: "#38bdf8", icon: '<path d="M12 3c-3 0-4.5 1.2-4.5 3v2h5v1h-7C3.7 9 3 10.8 3 12s.7 3 2.5 3H7v-2.2c0-1.7 1.5-2.8 3-2.8h4c1.4 0 2.5-1.1 2.5-2.5V6c0-1.8-1.5-3-4.5-3Z"></path><path d="M12 21c3 0 4.5-1.2 4.5-3v-2h-5v-1h7c1.8 0 2.5-1.8 2.5-3s-.7-3-2.5-3H17v2.2c0 1.7-1.5 2.8-3 2.8h-4c-1.4 0-2.5 1.1-2.5 2.5V18c0 1.8 1.5 3 4.5 3Z"></path>' },
+    web:        { label: "servidor web",      color: "#7c5cff", icon: '<circle cx="12" cy="12" r="9"></circle><path d="M3 12 L21 12"></path><path d="M12 3c2.5 2.4 3.8 5.6 3.8 9S14.5 18.6 12 21c-2.5-2.4-3.8-5.6-3.8-9S9.5 5.4 12 3Z"></path>' },
+    mysql:      { label: "MySQL",             color: "#f97316", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
+    java:       { label: "Java",              color: "#f97316", icon: '<path d="M8 21c2.7 1 5.3 1 8 0"></path><path d="M7 17.5c3.3 1 6.7 1 10 0"></path><path d="M12 3c2 2-2 3.5 0 5.5S16 11 12 13"></path>' },
+    ruby:       { label: "Ruby",              color: "#e5484d", icon: '<path d="M7 3 L17 3 L21 8 L12 21 L3 8 Z"></path><path d="M3 8 L21 8"></path><path d="M12 21 L8 8 M12 21 L16 8"></path>' },
+    shell:      { label: "shell",             color: "#a2b4d4", icon: '<rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M7 9.5 L10 12 L7 14.5"></path><path d="M12.5 15 L17 15"></path>' },
+    ssh:        { label: "SSH",               color: "#a2b4d4", icon: '<rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path>' },
+    systemd:    { label: "systemd",           color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
+    webo:       { label: "este painel",       color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
+    generic:    { label: "",                  color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
+  };
+  function hexSoft(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  function fmtRun(secs) {
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return d === 1 ? "1 dia" : `${d} dias`;
+    if (h > 0) return h === 1 ? "1 hora" : `${h} horas`;
+    if (m > 0) return `${m} min`;
+    return "agora";
+  }
+  function fmtMem(b) {
+    if (b >= GB) return `${fmt1(b / GB)} GB`;
+    return `${fmt0(b / 1024 ** 2)} MB`;
+  }
+  function fmtDisk(bps) {
+    if (bps < 1024) return "—";
+    const [v, u, f] = rateUnit(bps);
+    return `${f(v)} ${u}`;
+  }
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+
+  let procData = { total: null, processes: [] };
+  function renderProcesses() {
+    const q = $("proc-search").value.trim().toLowerCase();
+    const all = procData.processes;
+    const shown = q ? all.filter((p) => (p.name + " " + p.cmd).toLowerCase().includes(q)) : all;
+    const maxCpu = Math.max(...shown.map((p) => p.cpu_pct), 0.1);
+    $("proc-rows").innerHTML = shown.map((p) => {
+      const k = KINDS[p.kind] || KINDS.generic;
+      const sub = k.label ? `<span class="t">${k.label}</span>` : "";
+      return `<div class="proc-grid proc-row">
+        <div class="proc-id">
+          <div class="proc-icon" style="background:${hexSoft(k.color, p.kind === "generic" ? 0.1 : 0.14)}">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${k.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${k.icon}</svg>
+          </div>
+          <div class="proc-names">
+            <div class="proc-title"><span class="n">${esc(p.name)}</span>${sub}</div>
+            <span class="proc-cmd">${esc(p.cmd || "")}</span>
+          </div>
+        </div>
+        <span class="cell-dim col-time">${fmtRun(p.uptime_secs)}</span>
+        <div class="cpu-cell">
+          <span class="cell-num">${p.cpu_pct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
+          <div class="mini-track"><div class="mini-fill" style="width:${Math.min((p.cpu_pct / maxCpu) * 100, 100)}%"></div></div>
+        </div>
+        <span class="cell-num">${fmtMem(p.mem_bytes)}</span>
+        <span class="cell-dim col-disk">${fmtDisk(p.disk_bps)}</span>
+      </div>`;
+    }).join("");
+    const quiet = procData.total != null ? procData.total - all.length : null;
+    $("proc-head").textContent = procData.total != null
+      ? `Os que mais consomem · ${fmt0(procData.total)} processos no total` : "Os que mais consomem";
+    $("proc-foot-txt").textContent = q
+      ? `${shown.length} de ${all.length} na busca por "${q}"`
+      : quiet != null && quiet > 0
+        ? `mostrando os ${all.length} mais ativos · o resto está quieto`
+        : `mostrando ${all.length} processos`;
+  }
+  async function tickProcesses() {
+    if ($("view-processes").hidden) return;
+    try {
+      procData = await (await fetch("/api/v1/processes")).json();
+      renderProcesses();
+    } catch {}
+  }
+  $("proc-search").addEventListener("input", renderProcesses);
+
+  const tabs = [
+    { btn: "tab-overview", view: "view-overview" },
+    { btn: "tab-processes", view: "view-processes" },
+  ];
+  tabs.forEach(({ btn, view }) => {
+    $(btn).addEventListener("click", () => {
+      tabs.forEach((t) => {
+        $(t.btn).classList.toggle("on", t.btn === btn);
+        $(t.view).hidden = t.view !== view;
+      });
+      $("proc-search-box").hidden = view !== "view-processes";
+      if (view === "view-processes") tickProcesses();
+    });
+  });
+
   loadSystem().catch(() => {});
-  tick(); tickHistory();
+  tick(); tickHistory(); tickProcesses();
   setInterval(tick, 15000);
   setInterval(tickHistory, 60000);
+  setInterval(tickProcesses, 15000);
 })();
 </script>
 </body>

@@ -36,6 +36,20 @@ pub struct Snapshot {
     pub uptime_secs: u64,
 }
 
+/// One process, as the panel's Processes tab shows it. `kind` is only what
+/// is honestly detectable from the binary name (technology, never purpose).
+#[derive(Clone, Serialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub name: String,
+    pub cmd: String,
+    pub kind: String,
+    pub uptime_secs: u64,
+    pub cpu_pct: f32,
+    pub mem_bytes: u64,
+    pub disk_bps: u64,
+}
+
 /// Facts that rarely change — a separate endpoint so automations can answer
 /// "what machine is this?" without a snapshot.
 #[derive(Clone, Default, Serialize)]
@@ -57,6 +71,7 @@ pub struct State {
     pub system: SystemInfo,
     pub history: VecDeque<Sample>,
     pub history_cap: usize,
+    pub processes: Vec<ProcessInfo>,
 }
 
 impl State {
@@ -66,6 +81,7 @@ impl State {
             system: SystemInfo::default(),
             history: VecDeque::with_capacity(history_cap),
             history_cap,
+            processes: Vec::new(),
         }
     }
 

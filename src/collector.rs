@@ -1,8 +1,8 @@
-use crate::metrics::{Snapshot, State, SystemInfo};
+use crate::metrics::{ProcessInfo, Snapshot, State, SystemInfo};
 use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use sysinfo::{Components, Disks, System};
+use sysinfo::{Components, Disks, ProcessesToUpdate, System};
 use tokio::sync::RwLock;
 
 fn now_ts() -> u64 {
@@ -99,6 +99,58 @@ fn count_processes() -> Option<usize> {
     )
 }
 
+/// Technology detectable from the binary name — never a guess at purpose.
+fn kind_for(name: &str) -> &'static str {
+    let n = name.to_ascii_lowercase();
+    if n == "node" || n == "nodejs" || n == "bun" || n == "deno" { "node" }
+    else if n.starts_with("postgres") { "postgres" }
+    else if n == "dockerd" || n == "docker-proxy" || n.starts_with("containerd") || n.starts_with("runc") { "docker" }
+    else if n == "cloudflared" { "cloudflare" }
+    else if n.starts_with("redis") { "redis" }
+    else if n.starts_with("python") { "python" }
+    else if n == "nginx" || n == "caddy" || n == "httpd" || n == "traefik" { "web" }
+    else if n.starts_with("mysql") || n.starts_with("mariadb") { "mysql" }
+    else if n == "java" { "java" }
+    else if n == "ruby" || n.starts_with("puma") || n.starts_with("sidekiq") { "ruby" }
+    else if n == "bash" || n == "zsh" || n == "sh" || n == "fish" { "shell" }
+    else if n == "sshd" || n == "ssh" { "ssh" }
+    else if n.starts_with("systemd") { "systemd" }
+    else if n == "webo" { "webo" }
+    else { "generic" }
+}
+
+/// Top processes by CPU — the raw material of the Processes tab.
+fn collect_processes(sys: &mut System, sample_secs: u64) -> Vec<ProcessInfo> {
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut list: Vec<ProcessInfo> = sys
+        .processes()
+        .values()
+        .filter(|p| p.thread_kind().is_none())
+        .filter_map(|p| {
+            let name = p.name().to_string_lossy().to_string();
+            let cmd: Vec<String> = p.cmd().iter().map(|c| c.to_string_lossy().to_string()).collect();
+            // kernel threads have no cmdline and no exe
+            if cmd.is_empty() && p.exe().is_none() {
+                return None;
+            }
+            let du = p.disk_usage();
+            Some(ProcessInfo {
+                pid: p.pid().as_u32(),
+                name,
+                cmd: cmd.join(" ").chars().take(200).collect(),
+                kind: kind_for(&p.name().to_string_lossy()).to_string(),
+                uptime_secs: p.run_time(),
+                cpu_pct: p.cpu_usage(),
+                mem_bytes: p.memory(),
+                disk_bps: (du.read_bytes + du.written_bytes) / sample_secs.max(1),
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.mem_bytes.cmp(&a.mem_bytes)));
+    list.truncate(40);
+    list
+}
+
 fn root_disk(disks: &mut Disks) -> (u64, u64) {
     disks.refresh(true);
     // largest filesystem mounted at "/" (in a container, overlayfs reflects the host disk)
@@ -166,6 +218,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
 
         let (disk_used, disk_total) = root_disk(&mut disks);
         let (battery_pct, battery_limit_pct, battery_status) = read_battery();
+        let procs = collect_processes(&mut sys, sample_secs);
 
         let snap = Snapshot {
             ts: now_ts(),
@@ -189,6 +242,8 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
             uptime_secs: System::uptime(),
         };
 
-        state.write().await.push(snap);
+        let mut st = state.write().await;
+        st.processes = procs;
+        st.push(snap);
     }
 }

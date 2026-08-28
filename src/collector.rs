@@ -143,7 +143,10 @@ struct RawProc {
     pid: u32,
     ppid: u32,
     comm: String,
-    argv0: String,
+    /// First whitespace token of argv[0] — the executable path. Some apps
+    /// (Firefox content processes) rewrite their cmdline into one big string,
+    /// so raw argv[0] comparison would never match the parent.
+    bin: String,
     cmd: String,
     uptime_secs: u64,
     cpu_pct: f32,
@@ -172,7 +175,11 @@ fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawP
             .filter(|p| !p.is_empty())
             .map(|p| String::from_utf8_lossy(p).to_string())
             .collect();
-        let argv0 = args.first().cloned().unwrap_or_default();
+        let bin = args
+            .first()
+            .and_then(|a| a.split_whitespace().next())
+            .unwrap_or_default()
+            .to_string();
         let cmd: String = args.join(" ").chars().take(200).collect();
 
         let Ok(stat) = fs::read_to_string(base.join("stat")) else { continue };
@@ -226,7 +233,7 @@ fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawP
             pid,
             ppid,
             comm,
-            argv0,
+            bin,
             cmd,
             uptime_secs,
             cpu_pct,
@@ -240,8 +247,8 @@ fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawP
 }
 
 /// Groups an app with its subprocess tree: a process joins its parent's group
-/// while the parent runs the same executable (argv0) or has the same comm —
-/// the way browsers spawn content processes and postgres spawns workers.
+/// while the parent runs the same executable or has the same comm — the way
+/// browsers spawn content processes and postgres spawns workers.
 fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
     let by_pid: HashMap<u32, usize> = raw.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
 
@@ -251,7 +258,7 @@ fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
             let me = &raw[cur];
             let Some(&pi) = by_pid.get(&me.ppid) else { break };
             let parent = &raw[pi];
-            let same_bin = !me.argv0.is_empty() && parent.argv0 == me.argv0;
+            let same_bin = !me.bin.is_empty() && parent.bin == me.bin;
             if same_bin || parent.comm == me.comm {
                 cur = pi;
             } else {

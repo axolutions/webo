@@ -17,6 +17,18 @@ automation consumers. Open-source project (MIT).
   Portuguese.
 - Number/date formatting follows the active language's locale.
 
+## Tests & coverage — ALWAYS
+
+- **Every backend change ships with tests.** No PR merges without them.
+- **Line coverage must stay at or above 90%**, enforced in CI on every PR
+  and push to main (`cargo llvm-cov --fail-under-lines 90`). Only
+  `src/main.rs` (the thin binary shell) is excluded from the gate.
+- Run locally with `cargo test`; measure with `cargo llvm-cov` (install:
+  `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`).
+- Prefer pure, input-driven functions (parse text in, values out) over
+  I/O-coupled code — that is what keeps the collector testable without
+  a real `/proc`.
+
 ## Conventions
 
 - The panel must keep working (gracefully hiding cards) when a metric

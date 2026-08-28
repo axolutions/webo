@@ -114,3 +114,42 @@ impl State {
         self.snapshot = snap;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(ts: u64) -> Snapshot {
+        Snapshot { ts, cpu_pct: 1.0, mem_used: 42, ..Default::default() }
+    }
+
+    #[test]
+    fn push_appends_history_and_updates_snapshot() {
+        let mut st = State::new(3);
+        st.push(snap(1));
+        st.push(snap(2));
+        assert_eq!(st.history.len(), 2);
+        assert_eq!(st.snapshot.ts, 2);
+        assert_eq!(st.history.back().unwrap().ts, 2);
+        assert_eq!(st.history.back().unwrap().mem_used, 42);
+    }
+
+    #[test]
+    fn push_evicts_the_oldest_at_capacity() {
+        let mut st = State::new(3);
+        for ts in 1..=5 {
+            st.push(snap(ts));
+        }
+        assert_eq!(st.history.len(), 3);
+        assert_eq!(st.history.front().unwrap().ts, 3);
+        assert_eq!(st.history.back().unwrap().ts, 5);
+    }
+
+    #[test]
+    fn new_state_is_empty() {
+        let st = State::new(8);
+        assert!(st.history.is_empty());
+        assert!(st.processes.is_empty());
+        assert_eq!(st.snapshot.ts, 0);
+    }
+}

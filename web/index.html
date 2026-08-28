@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>webo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='3' width='20' height='9' rx='3' fill='%234f8bff'/%3E%3Crect x='2' y='14' width='20' height='7' rx='3' fill='%237c5cff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --accent: #4f8bff;
+    --accent-2: #7c5cff;
+    --page:
+      radial-gradient(1200px 700px at 12% -10%, #10254f 0%, rgba(16, 37, 79, 0) 60%),
+      radial-gradient(900px 600px at 92% 8%, #123a6b 0%, rgba(18, 58, 107, 0) 55%),
+      linear-gradient(180deg, #05080f 0%, #060c1a 45%, #081431 100%);
+    --surface: rgba(255, 255, 255, 0.045);
+    --surface-2: rgba(255, 255, 255, 0.075);
+    --surface-3: rgba(255, 255, 255, 0.11);
+    --card: linear-gradient(180deg, rgba(255, 255, 255, 0.062), rgba(255, 255, 255, 0.028));
+    --stroke: rgba(255, 255, 255, 0.085);
+    --stroke-strong: rgba(255, 255, 255, 0.2);
+    --text: #eaf0fd;
+    --text-2: #a2b4d4;
+    --text-3: #6f83a5;
+    --accent-soft: rgba(79, 139, 255, 0.16);
+    --sh: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 24px -14px rgba(0, 0, 0, 0.7);
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --ok: #3fca7c;
+    --ok-soft: rgba(63, 202, 124, 0.14);
+    --danger: #e5484d;
+    --spark-ring: #0a1226;
+  }
+  [data-theme="light"] {
+    --page:
+      radial-gradient(1000px 600px at 8% -10%, #dfe9ff 0%, rgba(223, 233, 255, 0) 60%),
+      radial-gradient(900px 600px at 95% 0%, #e6f0ff 0%, rgba(230, 240, 255, 0) 55%),
+      linear-gradient(180deg, #f4f7fd 0%, #eaf0fa 100%);
+    --surface: rgba(255, 255, 255, 0.62);
+    --surface-2: rgba(255, 255, 255, 0.82);
+    --surface-3: rgba(15, 32, 68, 0.06);
+    --card: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.72));
+    --stroke: rgba(15, 32, 68, 0.09);
+    --stroke-strong: rgba(15, 32, 68, 0.2);
+    --text: #0f1c33;
+    --text-2: #4c6183;
+    --text-3: #7c8dab;
+    --accent-soft: rgba(31, 107, 255, 0.12);
+    --sh: 0 1px 2px rgba(20, 40, 80, 0.06), 0 8px 20px -14px rgba(20, 40, 80, 0.35);
+    --spark-ring: #eef3fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--page); color: var(--text);
+    font-family: "IBM Plex Sans", system-ui, sans-serif; font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 22px 24px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 13px; }
+  .brand-icon {
+    display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px;
+    background: linear-gradient(150deg, var(--accent), var(--accent-2));
+    box-shadow: 0 10px 22px -12px var(--accent);
+  }
+  .brand-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+  .mono-badge {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.02em; color: var(--accent);
+    padding: 2px 7px; border-radius: 6px; background: var(--accent-soft); white-space: nowrap;
+  }
+  .chips { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .chip {
+    display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 13px;
+    border: 1px solid var(--stroke); border-radius: 9px; background: var(--surface);
+    color: var(--text-2); font-size: 12.5px; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+  .dot.off { background: var(--danger); box-shadow: none; }
+  .icon-btn {
+    display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid var(--stroke);
+    border-radius: 12px; background: var(--surface-2); color: var(--text-2); cursor: pointer; padding: 0;
+  }
+  .icon-btn:hover { color: var(--text); border-color: var(--stroke-strong); }
+  .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 26px; }
+  .stat-card {
+    display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; border-radius: 15px;
+    background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh);
+    backdrop-filter: blur(14px); min-width: 0;
+  }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .label {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-3);
+  }
+  .hero-row { display: flex; align-items: baseline; gap: 6px; }
+  .hero { font-size: 36px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .hero-unit { font-size: 17px; font-weight: 600; color: var(--text-3); }
+  .hero-side { margin-left: auto; font-size: 12.5px; color: var(--text-2); }
+  .hero-side b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+  .sub { font-size: 12px; color: var(--text-3); }
+  .bar-track { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.4s ease; }
+  .bar-cap { position: absolute; top: -2px; width: 2px; height: 12px; border-radius: 2px; background: var(--text-3); }
+  .row-between { display: flex; justify-content: space-between; }
+  .status-ok { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok); }
+  .status-ok .mini-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--ok); }
+  .status-hot { color: var(--danger); }
+  .status-hot .mini-dot { background: var(--danger); }
+  .system-card {
+    grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 18px; padding: 18px 24px;
+  }
+  .kv { display: flex; flex-direction: column; gap: 5px; }
+  .kv .v { font-size: 13.5px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+  .kv .v.mono { font-family: var(--mono); font-weight: 500; font-size: 12.5px; }
+  .spark { display: block; width: 100%; height: 56px; }
+  .net-heroes { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .net-item { display: flex; align-items: baseline; gap: 5px; }
+  footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
+  footer a { color: var(--accent); text-decoration: none; }
+  @media (max-width: 900px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 620px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+    .hero { font-size: 30px; }
+    .system-card { flex-direction: column; align-items: flex-start; gap: 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><circle cx="7" cy="8" r="0.6" fill="#fff"></circle><circle cx="7" cy="17" r="0.6" fill="#fff"></circle></svg>
+      </div>
+      <div style="display:flex;align-items:baseline;gap:10px">
+        <span class="brand-name">webo</span>
+        <span class="mono-badge" id="hostname">—</span>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip"><span class="dot" id="live-dot"></span><span id="uptime">carregando…</span></div>
+      <div class="chip" id="containers-chip" hidden><span id="containers">—</span></div>
+      <button class="icon-btn" id="theme-btn" title="Alternar tema" aria-label="Alternar tema">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stat-card">
+      <div class="card-head"><span class="label">CPU</span><span class="mono-badge" id="cpu-brand">—</span></div>
+      <div class="hero-row">
+        <span class="hero" id="cpu-pct">—</span><span class="hero-unit">%</span>
+        <span class="hero-side">load <b id="load">—</b></span>
+      </div>
+      <svg class="spark" id="spark-cpu" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
+      <span class="sub" id="cpu-sub">últimas 24 h</span>
+    </section>
+
+    <section class="stat-card">
+      <div class="card-head"><span class="label">Memória</span><span class="mono-badge" id="mem-total">—</span></div>
+      <div class="hero-row">
+        <span class="hero" id="mem-used">—</span><span class="hero-unit" id="mem-unit">GB</span>
+        <span class="hero-side"><b id="mem-pct">—</b> em uso</span>
+      </div>
+      <svg class="spark" id="spark-mem" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
+      <span class="sub" id="mem-sub">últimas 24 h</span>
+    </section>
+
+    <section class="stat-card">
+      <div class="card-head"><span class="label">Disco</span><span class="mono-badge" id="disk-total">—</span></div>
+      <div class="hero-row">
+        <span class="hero" id="disk-used">—</span><span class="hero-unit" id="disk-unit">GB</span>
+        <span class="hero-side"><b id="disk-pct">—</b> usado</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
+        <div class="bar-track"><div class="bar-fill" id="disk-bar" style="width:0%"></div></div>
+        <div class="row-between sub"><span id="disk-free">—</span><span>filesystem raiz</span></div>
+      </div>
+    </section>
+
+    <section class="stat-card" id="temp-card">
+      <div class="card-head"><span class="label">Temperatura</span>
+        <span class="status-ok" id="temp-status"><span class="mini-dot"></span><span id="temp-status-txt">—</span></span>
+      </div>
+      <div class="hero-row"><span class="hero" id="temp">—</span><span class="hero-unit">°C</span></div>
+      <div style="display:flex;flex-direction:column;gap:9px">
+        <div class="bar-track"><div class="bar-fill" id="temp-bar" style="width:0%"></div></div>
+        <div class="row-between sub"><span>CPU</span><span>alerta em 85 °C</span></div>
+      </div>
+    </section>
+
+    <section class="stat-card" id="battery-card">
+      <div class="card-head"><span class="label">Bateria</span><span class="mono-badge" id="battery-limit" hidden>—</span></div>
+      <div class="hero-row">
+        <span class="hero" id="battery">—</span><span class="hero-unit">%</span>
+        <span class="hero-side" id="battery-status">—</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:9px">
+        <div class="bar-track"><div class="bar-fill" id="battery-bar" style="width:0%"></div><div class="bar-cap" id="battery-cap" hidden></div></div>
+        <div class="row-between sub"><span id="battery-note">—</span></div>
+      </div>
+    </section>
+
+    <section class="stat-card">
+      <div class="card-head"><span class="label">Rede</span></div>
+      <div class="net-heroes">
+        <div class="net-item">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:translateY(1px)" aria-hidden="true"><path d="M12 4 L12 20"></path><path d="M6 14 L12 20 L18 14"></path></svg>
+          <span class="hero" style="font-size:27px" id="net-rx">—</span><span class="hero-unit" style="font-size:14px" id="net-rx-unit">MB/s</span>
+        </div>
+        <div class="net-item">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:translateY(1px)" aria-hidden="true"><path d="M12 20 L12 4"></path><path d="M6 10 L12 4 L18 10"></path></svg>
+          <span class="hero" style="font-size:27px;color:var(--text-2)" id="net-tx">—</span><span class="hero-unit" style="font-size:14px" id="net-tx-unit">MB/s</span>
+        </div>
+      </div>
+      <svg class="spark" id="spark-net" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
+      <span class="sub">download · últimas 24 h</span>
+    </section>
+
+    <section class="stat-card system-card">
+      <div class="kv"><span class="label">Sistema</span><span class="v" id="sys-os">—</span></div>
+      <div class="kv"><span class="label">Kernel</span><span class="v mono" id="sys-kernel">—</span></div>
+      <div class="kv"><span class="label">Arquitetura</span><span class="v mono" id="sys-arch">—</span></div>
+      <div class="kv"><span class="label">Processos</span><span class="v" id="sys-procs">—</span></div>
+      <div class="kv"><span class="label">Coleta</span><span class="v" id="sys-sample">—</span></div>
+      <div class="kv"><span class="label">Webo</span><span class="v mono" id="sys-version">—</span></div>
+    </section>
+  </main>
+
+  <footer>webo · painel de saúde self-hosted</footer>
+</div>
+
+<script>
+(() => {
+  // tema: escolha explícita > preferência do sistema (dark é o padrão do design)
+  const root = document.documentElement;
+  const applyTheme = (t) => { if (t === "light") root.dataset.theme = "light"; else delete root.dataset.theme; };
+  let theme = null;
+  try { theme = localStorage.getItem("webo-theme"); } catch {}
+  if (!theme) theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  applyTheme(theme);
+  document.getElementById("theme-btn").addEventListener("click", () => {
+    theme = theme === "light" ? "dark" : "light";
+    applyTheme(theme);
+    try { localStorage.setItem("webo-theme", theme); } catch {}
+  });
+
+  const $ = (id) => document.getElementById(id);
+  const GB = 1024 ** 3;
+  const fmt1 = (n) => n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+  const fmt0 = (n) => Math.round(n).toLocaleString("pt-BR");
+
+  function bytesUnit(bytes) {
+    if (bytes >= 100 * GB) return [bytes / GB, "GB", fmt0];
+    if (bytes >= GB) return [bytes / GB, "GB", fmt1];
+    return [bytes / 1024 ** 2, "MB", fmt0];
+  }
+  function rateUnit(bps) {
+    if (bps >= 1024 ** 2) return [bps / 1024 ** 2, "MB/s", fmt1];
+    if (bps >= 1024) return [bps / 1024, "KB/s", fmt0];
+    return [bps, "B/s", fmt0];
+  }
+  function fmtUptime(secs) {
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return `no ar há ${d} d ${h} h`;
+    if (h > 0) return `no ar há ${h} h ${m} min`;
+    return `no ar há ${m} min`;
+  }
+
+  // sparkline: série -> path (340×56); padding vertical de 6px
+  function sparkline(svgId, values, max) {
+    const svg = $(svgId);
+    if (!values.length) { svg.replaceChildren(); return; }
+    const W = 340, H = 56, PAD = 6;
+    const top = max ?? Math.max(...values, 1e-9);
+    const pts = values.map((v, i) => {
+      const x = values.length === 1 ? W : (i / (values.length - 1)) * W;
+      const y = H - PAD - Math.min(v / top, 1) * (H - 2 * PAD);
+      return [x, y];
+    });
+    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    const [lx, ly] = pts[pts.length - 1];
+    svg.innerHTML =
+      `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="rgba(140,165,215,0.12)" stroke-width="1"></line>` +
+      `<path d="${line} L${W},${H} L0,${H} Z" fill="rgba(79,139,255,0.16)" stroke="none"></path>` +
+      `<path d="${line}" fill="none" stroke="#4f8bff" stroke-width="2" stroke-linecap="round"></path>` +
+      `<circle cx="${lx}" cy="${ly}" r="3.5" fill="#4f8bff" stroke="var(--spark-ring)" stroke-width="2"></circle>`;
+  }
+
+  // decima a série pra ~120 pontos (média por balde)
+  function decimate(values, target = 120) {
+    if (values.length <= target) return values;
+    const size = values.length / target;
+    const out = [];
+    for (let i = 0; i < target; i++) {
+      const a = Math.floor(i * size), b = Math.max(a + 1, Math.floor((i + 1) * size));
+      let sum = 0;
+      for (let j = a; j < b; j++) sum += values[j];
+      out.push(sum / (b - a));
+    }
+    return out;
+  }
+
+  async function loadSystem() {
+    const s = await (await fetch("/api/v1/system")).json();
+    $("hostname").textContent = s.hostname || "?";
+    $("cpu-brand").textContent = `${shortCpu(s.cpu_brand)} · ${s.cpu_threads} threads`;
+    $("mem-total").textContent = `${fmt0(s.mem_total / GB)} GB`;
+    $("disk-total").textContent = `${fmt0(s.disk_total / GB)} GB`;
+    $("sys-os").textContent = s.os || "—";
+    $("sys-kernel").textContent = s.kernel || "—";
+    $("sys-arch").textContent = s.arch || "—";
+    $("sys-sample").textContent = `a cada ${s.sample_secs} s`;
+    $("sys-version").textContent = `v${s.webo_version}`;
+  }
+  function shortCpu(brand) {
+    return (brand || "").replace(/\(R\)|\(TM\)|CPU|Processor|@.*$/g, "").replace(/\s+/g, " ").trim() || "—";
+  }
+
+  function renderSnapshot(s) {
+    $("cpu-pct").textContent = fmt0(s.cpu_pct);
+    $("load").textContent = s.load_1m.toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+    const [mv, mu, mf] = bytesUnit(s.mem_used);
+    $("mem-used").textContent = mf(mv); $("mem-unit").textContent = mu;
+    $("mem-pct").textContent = `${fmt0((s.mem_used / s.mem_total) * 100)}%`;
+    const [dv, du, df] = bytesUnit(s.disk_used);
+    $("disk-used").textContent = df(dv); $("disk-unit").textContent = du;
+    const dpct = (s.disk_used / s.disk_total) * 100;
+    $("disk-pct").textContent = `${fmt0(dpct)}%`;
+    $("disk-bar").style.width = `${Math.min(dpct, 100)}%`;
+    $("disk-free").textContent = `${fmt0((s.disk_total - s.disk_used) / GB)} GB livres`;
+
+    if (s.temp_c != null) {
+      $("temp").textContent = fmt0(s.temp_c);
+      $("temp-bar").style.width = `${Math.min(s.temp_c, 100)}%`;
+      const hot = s.temp_c >= 85;
+      $("temp-status").classList.toggle("status-hot", hot);
+      $("temp-status-txt").textContent = hot ? "quente" : "normal";
+    } else {
+      $("temp-card").hidden = true;
+    }
+
+    if (s.battery_pct != null) {
+      $("battery").textContent = s.battery_pct;
+      $("battery-bar").style.width = `${s.battery_pct}%`;
+      $("battery-status").textContent =
+        s.battery_status === "Charging" ? "carregando" :
+        s.battery_status === "Discharging" ? "na bateria" : "na tomada";
+      if (s.battery_limit_pct != null) {
+        $("battery-limit").hidden = false;
+        $("battery-limit").textContent = `limite ${s.battery_limit_pct}%`;
+        $("battery-cap").hidden = false;
+        $("battery-cap").style.left = `${s.battery_limit_pct}%`;
+        $("battery-note").textContent = "carga travada pra saúde da bateria";
+      } else {
+        $("battery-note").textContent = "";
+      }
+    } else {
+      $("battery-card").hidden = true;
+    }
+
+    const [rv, ru, rf] = rateUnit(s.net_rx_bps);
+    $("net-rx").textContent = rf(rv); $("net-rx-unit").textContent = ru;
+    const [tv, tu, tf] = rateUnit(s.net_tx_bps);
+    $("net-tx").textContent = tf(tv); $("net-tx-unit").textContent = tu;
+
+    $("uptime").textContent = fmtUptime(s.uptime_secs);
+    if (s.containers_running != null) {
+      $("containers-chip").hidden = false;
+      $("containers").textContent = `${s.containers_running} containers ativos`;
+    }
+    $("sys-procs").textContent = s.processes != null ? fmt0(s.processes) : "—";
+  }
+
+  function renderHistory(h) {
+    if (!h.length) return;
+    sparkline("spark-cpu", decimate(h.map((x) => x.cpu_pct)), 100);
+    const memTotalHint = Math.max(...h.map((x) => x.mem_used)) * 1.4;
+    sparkline("spark-mem", decimate(h.map((x) => x.mem_used)), memTotalHint);
+    sparkline("spark-net", decimate(h.map((x) => x.net_rx_bps)));
+    const peak = Math.max(...h.map((x) => x.cpu_pct));
+    $("cpu-sub").textContent = `últimas 24 h · pico ${fmt0(peak)}%`;
+  }
+
+  async function tick() {
+    try {
+      const s = await (await fetch("/api/v1/snapshot")).json();
+      if (s.ts) { renderSnapshot(s); $("live-dot").classList.remove("off"); }
+    } catch { $("live-dot").classList.add("off"); $("uptime").textContent = "sem conexão"; }
+  }
+  async function tickHistory() {
+    try { renderHistory(await (await fetch("/api/v1/history")).json()); } catch {}
+  }
+
+  loadSystem().catch(() => {});
+  tick(); tickHistory();
+  setInterval(tick, 15000);
+  setInterval(tickHistory, 60000);
+})();
+</script>
+</body>
+</html>

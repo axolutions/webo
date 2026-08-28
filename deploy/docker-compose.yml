@@ -1,0 +1,17 @@
+# webo — suba com: docker compose -f deploy/docker-compose.yml up -d --build
+# Painel em http://<servidor>:5050
+services:
+  webo:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "5050:5050"
+    pid: host                # processos e CPU/memória do host, não do container
+    restart: unless-stopped
+    environment:
+      - WEBO_NET_DEV=/host/proc_net_dev
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # contagem de containers (opcional)
+      - /proc/net/dev:/host/proc_net_dev:ro            # taxas de rede do host (opcional)
+      - /sys:/sys:ro                                   # temperatura e bateria (opcional)

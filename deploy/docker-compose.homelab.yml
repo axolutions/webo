@@ -1,0 +1,13 @@
+# Override do homelab (ThinkPad): imagem do GHCR, rede compartilhada com o
+# cloudflared. Usar junto com o docker-compose.yml:
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.homelab.yml up -d
+services:
+  webo:
+    image: ghcr.io/axolutions/webo:latest
+    container_name: webo
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true

@@ -1,8 +1,9 @@
 use crate::metrics::{ProcessInfo, Snapshot, State, SystemInfo};
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use sysinfo::{Components, Disks, ProcessesToUpdate, System};
+use sysinfo::{Components, Disks, System};
 use tokio::sync::RwLock;
 
 fn now_ts() -> u64 {
@@ -119,33 +120,113 @@ fn kind_for(name: &str) -> &'static str {
     else { "generic" }
 }
 
-/// Top processes by CPU — the raw material of the Processes tab.
-fn collect_processes(sys: &mut System, sample_secs: u64) -> Vec<ProcessInfo> {
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    let mut list: Vec<ProcessInfo> = sys
-        .processes()
-        .values()
-        .filter(|p| p.thread_kind().is_none())
-        .filter_map(|p| {
-            let name = p.name().to_string_lossy().to_string();
-            let cmd: Vec<String> = p.cmd().iter().map(|c| c.to_string_lossy().to_string()).collect();
-            // kernel threads have no cmdline and no exe
-            if cmd.is_empty() && p.exe().is_none() {
-                return None;
-            }
-            let du = p.disk_usage();
-            Some(ProcessInfo {
-                pid: p.pid().as_u32(),
-                name,
-                cmd: cmd.join(" ").chars().take(200).collect(),
-                kind: kind_for(&p.name().to_string_lossy()).to_string(),
-                uptime_secs: p.run_time(),
-                cpu_pct: p.cpu_usage(),
-                mem_bytes: p.memory(),
-                disk_bps: (du.read_bytes + du.written_bytes) / sample_secs.max(1),
+/// Manual /proc scanner. sysinfo misbehaves under `pid: host` inside a
+/// container, and /proc is all we need: stat (cpu ticks, start time),
+/// statm (rss), cmdline, io (bytes). CPU% is a delta between ticks,
+/// like top(1) — % of a single core.
+const CLK_TCK: u64 = 100;
+const PAGE_SIZE: u64 = 4096;
+
+fn read_host_uptime() -> f64 {
+    fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|t| t.split_whitespace().next().and_then(|v| v.parse().ok()))
+        .unwrap_or(0.0)
+}
+
+struct ProcSample {
+    cpu_ticks: u64,
+    io_bytes: u64,
+}
+
+fn collect_processes(
+    prev: &mut HashMap<u32, ProcSample>,
+    sample_secs: u64,
+) -> Vec<ProcessInfo> {
+    let host_uptime = read_host_uptime();
+    let mut seen: HashMap<u32, ProcSample> = HashMap::new();
+    let mut list: Vec<ProcessInfo> = Vec::new();
+
+    let Ok(entries) = fs::read_dir("/proc") else { return list };
+    for e in entries.flatten() {
+        let fname = e.file_name();
+        let Ok(pid) = fname.to_string_lossy().parse::<u32>() else { continue };
+        let base = e.path();
+
+        // kernel threads have an empty cmdline — skip them
+        let cmdline = fs::read(base.join("cmdline")).unwrap_or_default();
+        if cmdline.is_empty() {
+            continue;
+        }
+        let cmd: String = cmdline
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(200)
+            .collect();
+
+        let Ok(stat) = fs::read_to_string(base.join("stat")) else { continue };
+        // comm is inside parens and may contain spaces: split around the last ')'
+        let Some(open) = stat.find('(') else { continue };
+        let Some(close) = stat.rfind(')') else { continue };
+        let comm = stat[open + 1..close].to_string();
+        let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        // after the state field: utime=rest[11], stime=rest[12], starttime=rest[19]
+        if rest.len() < 20 {
+            continue;
+        }
+        let utime: u64 = rest[11].parse().unwrap_or(0);
+        let stime: u64 = rest[12].parse().unwrap_or(0);
+        let starttime: u64 = rest[19].parse().unwrap_or(0);
+        let cpu_ticks = utime + stime;
+
+        let mem_bytes = fs::read_to_string(base.join("statm"))
+            .ok()
+            .and_then(|t| t.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
+            .map(|pages| pages * PAGE_SIZE)
+            .unwrap_or(0);
+
+        // may be unreadable for some processes — treat as zero
+        let io_bytes = fs::read_to_string(base.join("io"))
+            .map(|t| {
+                t.lines()
+                    .filter_map(|l| {
+                        l.strip_prefix("read_bytes: ")
+                            .or_else(|| l.strip_prefix("write_bytes: "))
+                            .and_then(|v| v.trim().parse::<u64>().ok())
+                    })
+                    .sum::<u64>()
             })
-        })
-        .collect();
+            .unwrap_or(0);
+
+        let (cpu_pct, disk_bps) = match prev.get(&pid) {
+            Some(p) => (
+                (cpu_ticks.saturating_sub(p.cpu_ticks) as f32 / CLK_TCK as f32)
+                    / sample_secs.max(1) as f32
+                    * 100.0,
+                io_bytes.saturating_sub(p.io_bytes) / sample_secs.max(1),
+            ),
+            None => (0.0, 0),
+        };
+        seen.insert(pid, ProcSample { cpu_ticks, io_bytes });
+
+        let uptime_secs = (host_uptime - (starttime as f64 / CLK_TCK as f64)).max(0.0) as u64;
+        list.push(ProcessInfo {
+            pid,
+            name: comm.clone(),
+            cmd,
+            kind: kind_for(&comm).to_string(),
+            uptime_secs,
+            cpu_pct,
+            mem_bytes,
+            disk_bps,
+        });
+    }
+
+    *prev = seen;
     list.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.mem_bytes.cmp(&a.mem_bytes)));
     list.truncate(40);
     list
@@ -175,6 +256,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
     let mut disks = Disks::new_with_refreshed_list();
     let mut components = Components::new_with_refreshed_list();
     let mut last_net: Option<(u64, u64)> = None;
+    let mut proc_prev: HashMap<u32, ProcSample> = HashMap::new();
 
     sys.refresh_cpu_usage();
     sys.refresh_memory();
@@ -218,7 +300,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
 
         let (disk_used, disk_total) = root_disk(&mut disks);
         let (battery_pct, battery_limit_pct, battery_status) = read_battery();
-        let procs = collect_processes(&mut sys, sample_secs);
+        let procs = collect_processes(&mut proc_prev, sample_secs);
 
         let snap = Snapshot {
             ts: now_ts(),

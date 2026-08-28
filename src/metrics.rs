@@ -36,10 +36,23 @@ pub struct Snapshot {
     pub uptime_secs: u64,
 }
 
-/// One process, as the panel's Processes tab shows it. `kind` is only what
-/// is honestly detectable from the binary name (technology, never purpose).
+/// A member of a process group (subprocess), as shown when a row expands.
 #[derive(Clone, Serialize)]
-pub struct ProcessInfo {
+pub struct ProcessChild {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_pct: f32,
+    pub mem_bytes: u64,
+    pub disk_bps: u64,
+    pub uptime_secs: u64,
+}
+
+/// One row of the Processes tab: an app and its subprocess tree, aggregated.
+/// Grouping is by parent chain sharing the same executable (argv0) or the
+/// same comm — how browsers, postgres workers etc. spawn. `kind` is only
+/// what is honestly detectable from the binary name (technology, never purpose).
+#[derive(Clone, Serialize)]
+pub struct ProcessGroup {
     pub pid: u32,
     pub name: String,
     pub cmd: String,
@@ -48,6 +61,8 @@ pub struct ProcessInfo {
     pub cpu_pct: f32,
     pub mem_bytes: u64,
     pub disk_bps: u64,
+    pub procs: usize,
+    pub children: Vec<ProcessChild>,
 }
 
 /// Facts that rarely change — a separate endpoint so automations can answer
@@ -71,7 +86,7 @@ pub struct State {
     pub system: SystemInfo,
     pub history: VecDeque<Sample>,
     pub history_cap: usize,
-    pub processes: Vec<ProcessInfo>,
+    pub processes: Vec<ProcessGroup>,
 }
 
 impl State {

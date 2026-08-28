@@ -1,4 +1,4 @@
-use crate::metrics::{ProcessInfo, Snapshot, State, SystemInfo};
+use crate::metrics::{ProcessChild, ProcessGroup, Snapshot, State, SystemInfo};
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
@@ -121,7 +121,7 @@ fn kind_for(name: &str) -> &'static str {
 }
 
 /// Manual /proc scanner. sysinfo misbehaves under `pid: host` inside a
-/// container, and /proc is all we need: stat (cpu ticks, start time),
+/// container, and /proc is all we need: stat (cpu ticks, ppid, start time),
 /// statm (rss), cmdline, io (bytes). CPU% is a delta between ticks,
 /// like top(1) — % of a single core.
 const CLK_TCK: u64 = 100;
@@ -139,13 +139,22 @@ struct ProcSample {
     io_bytes: u64,
 }
 
-fn collect_processes(
-    prev: &mut HashMap<u32, ProcSample>,
-    sample_secs: u64,
-) -> Vec<ProcessInfo> {
+struct RawProc {
+    pid: u32,
+    ppid: u32,
+    comm: String,
+    argv0: String,
+    cmd: String,
+    uptime_secs: u64,
+    cpu_pct: f32,
+    mem_bytes: u64,
+    disk_bps: u64,
+}
+
+fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawProc> {
     let host_uptime = read_host_uptime();
     let mut seen: HashMap<u32, ProcSample> = HashMap::new();
-    let mut list: Vec<ProcessInfo> = Vec::new();
+    let mut list: Vec<RawProc> = Vec::new();
 
     let Ok(entries) = fs::read_dir("/proc") else { return list };
     for e in entries.flatten() {
@@ -158,15 +167,13 @@ fn collect_processes(
         if cmdline.is_empty() {
             continue;
         }
-        let cmd: String = cmdline
+        let args: Vec<String> = cmdline
             .split(|b| *b == 0)
             .filter(|p| !p.is_empty())
             .map(|p| String::from_utf8_lossy(p).to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(200)
             .collect();
+        let argv0 = args.first().cloned().unwrap_or_default();
+        let cmd: String = args.join(" ").chars().take(200).collect();
 
         let Ok(stat) = fs::read_to_string(base.join("stat")) else { continue };
         // comm is inside parens and may contain spaces: split around the last ')'
@@ -174,10 +181,11 @@ fn collect_processes(
         let Some(close) = stat.rfind(')') else { continue };
         let comm = stat[open + 1..close].to_string();
         let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-        // after the state field: utime=rest[11], stime=rest[12], starttime=rest[19]
+        // after the state field: ppid=rest[1], utime=rest[11], stime=rest[12], starttime=rest[19]
         if rest.len() < 20 {
             continue;
         }
+        let ppid: u32 = rest[1].parse().unwrap_or(0);
         let utime: u64 = rest[11].parse().unwrap_or(0);
         let stime: u64 = rest[12].parse().unwrap_or(0);
         let starttime: u64 = rest[19].parse().unwrap_or(0);
@@ -214,11 +222,12 @@ fn collect_processes(
         seen.insert(pid, ProcSample { cpu_ticks, io_bytes });
 
         let uptime_secs = (host_uptime - (starttime as f64 / CLK_TCK as f64)).max(0.0) as u64;
-        list.push(ProcessInfo {
+        list.push(RawProc {
             pid,
-            name: comm.clone(),
+            ppid,
+            comm,
+            argv0,
             cmd,
-            kind: kind_for(&comm).to_string(),
             uptime_secs,
             cpu_pct,
             mem_bytes,
@@ -227,6 +236,74 @@ fn collect_processes(
     }
 
     *prev = seen;
+    list
+}
+
+/// Groups an app with its subprocess tree: a process joins its parent's group
+/// while the parent runs the same executable (argv0) or has the same comm —
+/// the way browsers spawn content processes and postgres spawns workers.
+fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
+    let by_pid: HashMap<u32, usize> = raw.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+
+    let root_of = |start: usize| -> usize {
+        let mut cur = start;
+        for _ in 0..64 {
+            let me = &raw[cur];
+            let Some(&pi) = by_pid.get(&me.ppid) else { break };
+            let parent = &raw[pi];
+            let same_bin = !me.argv0.is_empty() && parent.argv0 == me.argv0;
+            if same_bin || parent.comm == me.comm {
+                cur = pi;
+            } else {
+                break;
+            }
+        }
+        cur
+    };
+
+    let mut groups: HashMap<u32, ProcessGroup> = HashMap::new();
+    let mut members: HashMap<u32, Vec<usize>> = HashMap::new();
+    for i in 0..raw.len() {
+        let r = root_of(i);
+        members.entry(raw[r].pid).or_default().push(i);
+    }
+
+    for (root_pid, idxs) in members {
+        let root = &raw[by_pid[&root_pid]];
+        let mut g = ProcessGroup {
+            pid: root.pid,
+            name: root.comm.clone(),
+            cmd: root.cmd.clone(),
+            kind: kind_for(&root.comm).to_string(),
+            uptime_secs: root.uptime_secs,
+            cpu_pct: 0.0,
+            mem_bytes: 0,
+            disk_bps: 0,
+            procs: idxs.len(),
+            children: Vec::new(),
+        };
+        for &i in &idxs {
+            let p = &raw[i];
+            g.cpu_pct += p.cpu_pct;
+            g.mem_bytes += p.mem_bytes;
+            g.disk_bps += p.disk_bps;
+            if p.pid != root_pid {
+                g.children.push(ProcessChild {
+                    pid: p.pid,
+                    name: p.comm.clone(),
+                    cpu_pct: p.cpu_pct,
+                    mem_bytes: p.mem_bytes,
+                    disk_bps: p.disk_bps,
+                    uptime_secs: p.uptime_secs,
+                });
+            }
+        }
+        g.children.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.mem_bytes.cmp(&a.mem_bytes)));
+        g.children.truncate(20);
+        groups.insert(root_pid, g);
+    }
+
+    let mut list: Vec<ProcessGroup> = groups.into_values().collect();
     list.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.mem_bytes.cmp(&a.mem_bytes)));
     list.truncate(40);
     list
@@ -300,7 +377,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
 
         let (disk_used, disk_total) = root_disk(&mut disks);
         let (battery_pct, battery_limit_pct, battery_status) = read_battery();
-        let procs = collect_processes(&mut proc_prev, sample_secs);
+        let procs = group_processes(scan_procs(&mut proc_prev, sample_secs));
 
         let snap = Snapshot {
             ts: now_ts(),

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -83,7 +83,23 @@
   }
   .icon-btn:hover { color: var(--text); border-color: var(--stroke-strong); }
   .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  .tabs-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+  .seg { display: flex; gap: 3px; padding: 3px; border-radius: 12px; background: var(--surface-3); width: fit-content; }
+  .seg-btn {
+    height: 32px; padding: 0 13px; border: 0; border-radius: 9px; background: transparent;
+    color: var(--text-2); font-weight: 500; font-size: 13px; white-space: nowrap; font-family: inherit; cursor: pointer;
+  }
+  .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .seg-btn.on { background: var(--accent); color: #fff; font-weight: 600; box-shadow: 0 6px 14px -8px var(--accent); }
+  .search-box {
+    display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 12px; width: 260px; max-width: 100%;
+    border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2);
+  }
+  .search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .search-box svg { color: var(--text-3); flex: none; }
+  .search-box input { flex: 1; min-width: 0; border: 0; background: transparent; font: inherit; font-size: 13.5px; color: var(--text); outline: none; }
+  .search-box input::placeholder { color: var(--text-3); }
+  main { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
   .stat-card {
     display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; border-radius: 15px;
     background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh);
@@ -117,57 +133,60 @@
   .spark { display: block; width: 100%; height: 56px; }
   .net-heroes { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .net-item { display: flex; align-items: baseline; gap: 5px; }
-  .tabs-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
-  .seg { display: flex; gap: 3px; padding: 3px; border-radius: 12px; background: var(--surface-3); width: fit-content; }
-  .seg-btn {
-    height: 32px; padding: 0 13px; border: 0; border-radius: 9px; background: transparent;
-    color: var(--text-2); font-weight: 500; font-size: 13px; white-space: nowrap; font-family: inherit; cursor: pointer;
-  }
-  .seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .seg-btn.on { background: var(--accent); color: #fff; font-weight: 600; box-shadow: 0 6px 14px -8px var(--accent); }
-  .search-box {
-    display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 12px; width: 260px; max-width: 100%;
-    border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2);
-  }
-  .search-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
-  .search-box svg { color: var(--text-3); flex: none; }
-  .search-box input { flex: 1; min-width: 0; border: 0; background: transparent; font: inherit; font-size: 13.5px; color: var(--text); outline: none; }
-  .search-box input::placeholder { color: var(--text-3); }
   #view-processes { margin-top: 18px; }
   .proc-card {
     border-radius: 15px; background: var(--card); border: 1px solid var(--stroke);
     box-shadow: var(--sh); backdrop-filter: blur(14px); overflow: hidden;
   }
   .proc-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px 140px 100px 90px; gap: 14px; align-items: center; padding: 13px 22px; }
-  .proc-grid.head { padding: 14px 22px; border-bottom: 1px solid var(--stroke); }
+  .proc-grid.head { padding: 10px 22px; border-bottom: 1px solid var(--stroke); }
+  .sort-btn {
+    display: flex; align-items: center; gap: 5px; border: 0; background: transparent; padding: 4px 0;
+    font-family: inherit; cursor: pointer; text-align: left;
+    font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-3);
+  }
+  .sort-btn:hover { color: var(--text-2); }
+  .sort-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sort-btn.on { color: var(--accent); }
+  .sort-btn .arrow { font-size: 10px; line-height: 1; }
   .proc-row { border-top: 1px solid var(--stroke); }
-  .proc-row:first-of-type { border-top: 0; }
+  .proc-row.expandable { cursor: pointer; }
+  .proc-row.expandable:hover { background: var(--surface); }
   .proc-id { display: flex; align-items: center; gap: 13px; min-width: 0; }
   .proc-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; flex: none; }
   .proc-names { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .proc-title { display: flex; align-items: baseline; gap: 8px; }
+  .proc-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
   .proc-title .n { font-weight: 600; }
   .proc-title .t { font-size: 12px; color: var(--text-3); }
+  .procs-badge {
+    font-size: 10.5px; font-weight: 600; color: var(--text-2); padding: 1px 7px;
+    border-radius: 999px; background: var(--surface-3); white-space: nowrap;
+  }
+  .chev { transition: transform 0.15s ease; color: var(--text-3); flex: none; }
+  .proc-row.open .chev { transform: rotate(90deg); }
   .proc-cmd { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cell-num { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13.5px; }
   .cell-dim { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; }
   .cpu-cell { display: flex; align-items: center; gap: 10px; }
   .mini-track { width: 56px; height: 5px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
   .mini-fill { height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .child-rows { border-top: 1px solid var(--stroke); background: var(--surface); }
+  .child-row { grid-template-columns: minmax(0, 1fr) 120px 140px 100px 90px; padding: 8px 22px 8px 71px; }
+  .child-row .n { font-size: 13px; font-weight: 500; color: var(--text-2); }
+  .child-row .pid { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); }
   .proc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 22px; border-top: 1px solid var(--stroke); font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
   @media (max-width: 900px) {
-    .proc-grid { grid-template-columns: minmax(0, 1fr) 110px 90px; }
-    .proc-grid .col-time, .proc-grid .col-disk { display: none; }
+    main { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .proc-grid, .child-row { grid-template-columns: minmax(0, 1fr) 110px 90px; }
+    .col-time, .col-disk { display: none !important; }
     .proc-cmd { display: none; }
   }
-  footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
-  footer a { color: var(--accent); text-decoration: none; }
-  @media (max-width: 900px) { main { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 620px) {
     main { grid-template-columns: minmax(0, 1fr); }
     .hero { font-size: 30px; }
     .system-card { flex-direction: column; align-items: flex-start; gap: 14px; }
   }
+  footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
 </style>
 </head>
 <body>
@@ -183,8 +202,8 @@
       </div>
     </div>
     <div class="chips">
-      <div class="chip"><span class="dot" id="live-dot"></span><span id="uptime">carregando…</span></div>
-      <button class="icon-btn" id="theme-btn" title="Alternar tema" aria-label="Alternar tema">
+      <div class="chip"><span class="dot" id="live-dot"></span><span id="uptime">…</span></div>
+      <button class="icon-btn" id="theme-btn" aria-label="Toggle theme">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
       </button>
     </div>
@@ -192,73 +211,73 @@
 
   <div class="tabs-row">
     <div class="seg" role="tablist">
-      <button class="seg-btn on" id="tab-overview" role="tab">Visão geral</button>
-      <button class="seg-btn" id="tab-processes" role="tab">Processos</button>
+      <button class="seg-btn on" id="tab-overview" role="tab" data-i18n="tabOverview">Overview</button>
+      <button class="seg-btn" id="tab-processes" role="tab" data-i18n="tabProcesses">Processes</button>
     </div>
     <div class="search-box" id="proc-search-box" hidden>
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20 L16.5 16.5"></path></svg>
-      <input id="proc-search" type="search" placeholder="buscar processo…" autocomplete="off">
+      <input id="proc-search" type="search" autocomplete="off">
     </div>
   </div>
 
-  <main id="view-overview" style="margin-top: 18px;">
+  <main id="view-overview">
     <section class="stat-card">
-      <div class="card-head"><span class="label">CPU</span><span class="mono-badge" id="cpu-brand">—</span></div>
+      <div class="card-head"><span class="label" data-i18n="cpu">CPU</span><span class="mono-badge" id="cpu-brand">—</span></div>
       <div class="hero-row">
         <span class="hero" id="cpu-pct">—</span><span class="hero-unit">%</span>
         <span class="hero-side">load <b id="load">—</b></span>
       </div>
       <svg class="spark" id="spark-cpu" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
-      <span class="sub" id="cpu-sub">últimas 24 h</span>
+      <span class="sub" id="cpu-sub"></span>
     </section>
 
     <section class="stat-card">
-      <div class="card-head"><span class="label">Memória</span><span class="mono-badge" id="mem-total">—</span></div>
+      <div class="card-head"><span class="label" data-i18n="memory">Memory</span><span class="mono-badge" id="mem-total">—</span></div>
       <div class="hero-row">
         <span class="hero" id="mem-used">—</span><span class="hero-unit" id="mem-unit">GB</span>
-        <span class="hero-side"><b id="mem-pct">—</b> em uso</span>
+        <span class="hero-side"><b id="mem-pct">—</b> <span data-i18n="inUse">in use</span></span>
       </div>
       <svg class="spark" id="spark-mem" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
-      <span class="sub" id="mem-sub">últimas 24 h</span>
+      <span class="sub" data-i18n="last24h">last 24 h</span>
     </section>
 
     <section class="stat-card">
-      <div class="card-head"><span class="label">Disco</span><span class="mono-badge" id="disk-total">—</span></div>
+      <div class="card-head"><span class="label" data-i18n="disk">Disk</span><span class="mono-badge" id="disk-total">—</span></div>
       <div class="hero-row">
         <span class="hero" id="disk-used">—</span><span class="hero-unit" id="disk-unit">GB</span>
-        <span class="hero-side"><b id="disk-pct">—</b> usado</span>
+        <span class="hero-side"><b id="disk-pct">—</b> <span data-i18n="used">used</span></span>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px;margin-top:12px">
         <div class="bar-track"><div class="bar-fill" id="disk-bar" style="width:0%"></div></div>
-        <div class="row-between sub"><span id="disk-free">—</span><span>filesystem raiz</span></div>
+        <div class="row-between sub"><span id="disk-free">—</span><span data-i18n="rootFs">root filesystem</span></div>
       </div>
     </section>
 
     <section class="stat-card" id="temp-card">
-      <div class="card-head"><span class="label">Temperatura</span>
+      <div class="card-head"><span class="label" data-i18n="temperature">Temperature</span>
         <span class="status-ok" id="temp-status"><span class="mini-dot"></span><span id="temp-status-txt">—</span></span>
       </div>
       <div class="hero-row"><span class="hero" id="temp">—</span><span class="hero-unit">°C</span></div>
       <div style="display:flex;flex-direction:column;gap:9px">
         <div class="bar-track"><div class="bar-fill" id="temp-bar" style="width:0%"></div></div>
-        <div class="row-between sub"><span>CPU</span><span>alerta em 85 °C</span></div>
+        <div class="row-between sub"><span data-i18n="cpu">CPU</span><span data-i18n="alertAt">alert at 85 °C</span></div>
       </div>
     </section>
 
     <section class="stat-card" id="battery-card">
-      <div class="card-head"><span class="label">Bateria</span><span class="mono-badge" id="battery-limit" hidden>—</span></div>
+      <div class="card-head"><span class="label" data-i18n="battery">Battery</span><span class="mono-badge" id="battery-limit" hidden>—</span></div>
       <div class="hero-row">
         <span class="hero" id="battery">—</span><span class="hero-unit">%</span>
         <span class="hero-side" id="battery-status">—</span>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
         <div class="bar-track"><div class="bar-fill" id="battery-bar" style="width:0%"></div><div class="bar-cap" id="battery-cap" hidden></div></div>
-        <div class="row-between sub"><span id="battery-note">—</span></div>
+        <div class="row-between sub"><span id="battery-note"></span></div>
       </div>
     </section>
 
     <section class="stat-card">
-      <div class="card-head"><span class="label">Rede</span></div>
+      <div class="card-head"><span class="label" data-i18n="network">Network</span></div>
       <div class="net-heroes">
         <div class="net-item">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="transform:translateY(1px)" aria-hidden="true"><path d="M12 4 L12 20"></path><path d="M6 14 L12 20 L18 14"></path></svg>
@@ -270,15 +289,15 @@
         </div>
       </div>
       <svg class="spark" id="spark-net" viewBox="0 0 340 56" preserveAspectRatio="none"></svg>
-      <span class="sub">download · últimas 24 h</span>
+      <span class="sub" data-i18n="download24h">download · last 24 h</span>
     </section>
 
     <section class="stat-card system-card">
-      <div class="kv"><span class="label">Sistema</span><span class="v" id="sys-os">—</span></div>
-      <div class="kv"><span class="label">Kernel</span><span class="v mono" id="sys-kernel">—</span></div>
-      <div class="kv"><span class="label">Arquitetura</span><span class="v mono" id="sys-arch">—</span></div>
-      <div class="kv"><span class="label">Processos</span><span class="v" id="sys-procs">—</span></div>
-      <div class="kv"><span class="label">Coleta</span><span class="v" id="sys-sample">—</span></div>
+      <div class="kv"><span class="label" data-i18n="system">System</span><span class="v" id="sys-os">—</span></div>
+      <div class="kv"><span class="label" data-i18n="kernel">Kernel</span><span class="v mono" id="sys-kernel">—</span></div>
+      <div class="kv"><span class="label" data-i18n="arch">Architecture</span><span class="v mono" id="sys-arch">—</span></div>
+      <div class="kv"><span class="label" data-i18n="processesLbl">Processes</span><span class="v" id="sys-procs">—</span></div>
+      <div class="kv"><span class="label" data-i18n="sampling">Sampling</span><span class="v" id="sys-sample">—</span></div>
       <div class="kv"><span class="label">Webo</span><span class="v mono" id="sys-version">—</span></div>
     </section>
   </main>
@@ -286,27 +305,94 @@
   <section id="view-processes" hidden>
     <div class="proc-card">
       <div class="proc-grid head">
-        <span class="label" id="proc-head">Os que mais consomem</span>
-        <span class="label col-time">Rodando há</span>
-        <span class="label">CPU</span>
-        <span class="label">Memória</span>
-        <span class="label col-disk">Disco</span>
+        <button class="sort-btn" data-sort="name" id="proc-head"></button>
+        <button class="sort-btn col-time" data-sort="uptime" data-i18n-col="colRunning">Running for</button>
+        <button class="sort-btn on" data-sort="cpu">CPU</button>
+        <button class="sort-btn" data-sort="mem" data-i18n-col="colMemory">Memory</button>
+        <button class="sort-btn col-disk" data-sort="disk" data-i18n-col="colDisk">Disk</button>
       </div>
       <div id="proc-rows"></div>
-      <div class="proc-foot">
-        <span id="proc-foot-txt">carregando…</span>
-      </div>
+      <div class="proc-foot"><span id="proc-foot-txt">…</span></div>
     </div>
   </section>
 
-  <footer>webo · painel de saúde self-hosted</footer>
+  <footer data-i18n="footer">webo · self-hosted health panel</footer>
 </div>
 
 <script>
 (() => {
-  // tema: escolha explícita > preferência do sistema (dark é o padrão do design)
+  // ---------- i18n: English default, Portuguese when the browser says so ----------
+  const STR = {
+    en: {
+      tabOverview: "Overview", tabProcesses: "Processes",
+      cpu: "CPU", memory: "Memory", disk: "Disk", temperature: "Temperature",
+      battery: "Battery", network: "Network", system: "System", kernel: "Kernel",
+      arch: "Architecture", processesLbl: "Processes", sampling: "Sampling",
+      inUse: "in use", used: "used", rootFs: "root filesystem",
+      last24h: "last 24 h", last24hPeak: (p) => `last 24 h · peak ${p}%`,
+      download24h: "download · last 24 h", alertAt: "alert at 85 °C",
+      freeGb: (n) => `${n} GB free`, sampleEvery: (n) => `every ${n} s`,
+      normal: "normal", hot: "hot",
+      charging: "charging", onBattery: "on battery", onAc: "plugged in",
+      limitPct: (n) => `limit ${n}%`, chargeCapped: "charge capped for battery health",
+      upFor: (d) => `up for ${d}`, noConnection: "no connection",
+      searchPh: "search processes…",
+      procHead: (n) => `Top consumers · ${n} processes total`, procHeadPlain: "Top consumers",
+      colRunning: "Running for", colMemory: "Memory", colDisk: "Disk",
+      footShowing: (n) => `showing the ${n} most active · the rest is quiet`,
+      footShowingAll: (n) => `showing ${n} processes`,
+      footSearch: (a, b, q) => `${a} of ${b} matching "${q}"`,
+      procsBadge: (n) => `${n} processes`,
+      dayOne: "1 day", days: (n) => `${n} days`, hourOne: "1 hour", hours: (n) => `${n} hours`,
+      mins: (n) => `${n} min`, now: "just now",
+      dh: (d, h) => `${d} d ${h} h`, hm: (h, m) => `${h} h ${m} min`, onlyM: (m) => `${m} min`,
+      kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
+        redis: "Redis", python: "Python", web: "web server", mysql: "MySQL", java: "Java",
+        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "" },
+      footer: "webo · self-hosted health panel",
+    },
+    pt: {
+      tabOverview: "Visão geral", tabProcesses: "Processos",
+      cpu: "CPU", memory: "Memória", disk: "Disco", temperature: "Temperatura",
+      battery: "Bateria", network: "Rede", system: "Sistema", kernel: "Kernel",
+      arch: "Arquitetura", processesLbl: "Processos", sampling: "Coleta",
+      inUse: "em uso", used: "usado", rootFs: "filesystem raiz",
+      last24h: "últimas 24 h", last24hPeak: (p) => `últimas 24 h · pico ${p}%`,
+      download24h: "download · últimas 24 h", alertAt: "alerta em 85 °C",
+      freeGb: (n) => `${n} GB livres`, sampleEvery: (n) => `a cada ${n} s`,
+      normal: "normal", hot: "quente",
+      charging: "carregando", onBattery: "na bateria", onAc: "na tomada",
+      limitPct: (n) => `limite ${n}%`, chargeCapped: "carga travada pra saúde da bateria",
+      upFor: (d) => `no ar há ${d}`, noConnection: "sem conexão",
+      searchPh: "buscar processo…",
+      procHead: (n) => `Os que mais consomem · ${n} processos no total`, procHeadPlain: "Os que mais consomem",
+      colRunning: "Rodando há", colMemory: "Memória", colDisk: "Disco",
+      footShowing: (n) => `mostrando os ${n} mais ativos · o resto está quieto`,
+      footShowingAll: (n) => `mostrando ${n} processos`,
+      footSearch: (a, b, q) => `${a} de ${b} na busca por "${q}"`,
+      procsBadge: (n) => `${n} processos`,
+      dayOne: "1 dia", days: (n) => `${n} dias`, hourOne: "1 hora", hours: (n) => `${n} horas`,
+      mins: (n) => `${n} min`, now: "agora",
+      dh: (d, h) => `${d} d ${h} h`, hm: (h, m) => `${h} h ${m} min`, onlyM: (m) => `${m} min`,
+      kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
+        redis: "Redis", python: "Python", web: "servidor web", mysql: "MySQL", java: "Java",
+        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "" },
+      footer: "webo · painel de saúde self-hosted",
+    },
+  };
+  const LANG = (navigator.language || "en").toLowerCase().startsWith("pt") ? "pt" : "en";
+  const LOCALE = LANG === "pt" ? "pt-BR" : "en-US";
+  const t = (k, ...a) => {
+    const v = STR[LANG][k] ?? STR.en[k];
+    return typeof v === "function" ? v(...a) : v ?? k;
+  };
+  document.documentElement.lang = LANG === "pt" ? "pt-BR" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.getElementById("proc-search").placeholder = t("searchPh");
+
+  // ---------- theme: explicit choice > system preference ----------
   const root = document.documentElement;
-  const applyTheme = (t) => { if (t === "light") root.dataset.theme = "light"; else delete root.dataset.theme; };
+  const applyTheme = (th) => { if (th === "light") root.dataset.theme = "light"; else delete root.dataset.theme; };
   let theme = null;
   try { theme = localStorage.getItem("webo-theme"); } catch {}
   if (!theme) theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
@@ -317,10 +403,11 @@
     try { localStorage.setItem("webo-theme", theme); } catch {}
   });
 
+  // ---------- helpers ----------
   const $ = (id) => document.getElementById(id);
   const GB = 1024 ** 3;
-  const fmt1 = (n) => n.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
-  const fmt0 = (n) => Math.round(n).toLocaleString("pt-BR");
+  const fmt1 = (n) => n.toLocaleString(LOCALE, { maximumFractionDigits: 1 });
+  const fmt0 = (n) => Math.round(n).toLocaleString(LOCALE);
 
   function bytesUnit(bytes) {
     if (bytes >= 100 * GB) return [bytes / GB, "GB", fmt0];
@@ -334,12 +421,26 @@
   }
   function fmtUptime(secs) {
     const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
-    if (d > 0) return `no ar há ${d} d ${h} h`;
-    if (h > 0) return `no ar há ${h} h ${m} min`;
-    return `no ar há ${m} min`;
+    if (d > 0) return t("upFor", t("dh", d, h));
+    if (h > 0) return t("upFor", t("hm", h, m));
+    return t("upFor", t("onlyM", m));
   }
+  function fmtRun(secs) {
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return d === 1 ? t("dayOne") : t("days", d);
+    if (h > 0) return h === 1 ? t("hourOne") : t("hours", h);
+    if (m > 0) return t("mins", m);
+    return t("now");
+  }
+  function fmtMem(b) { return b >= GB ? `${fmt1(b / GB)} GB` : `${fmt0(b / 1024 ** 2)} MB`; }
+  function fmtDisk(bps) {
+    if (bps < 1024) return "—";
+    const [v, u, f] = rateUnit(bps);
+    return `${f(v)} ${u}`;
+  }
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 
-  // sparkline: série -> path (340×56); padding vertical de 6px
+  // ---------- sparklines ----------
   function sparkline(svgId, values, max) {
     const svg = $(svgId);
     if (!values.length) { svg.replaceChildren(); return; }
@@ -358,8 +459,6 @@
       `<path d="${line}" fill="none" stroke="#4f8bff" stroke-width="2" stroke-linecap="round"></path>` +
       `<circle cx="${lx}" cy="${ly}" r="3.5" fill="#4f8bff" stroke="var(--spark-ring)" stroke-width="2"></circle>`;
   }
-
-  // decima a série pra ~120 pontos (média por balde)
   function decimate(values, target = 120) {
     if (values.length <= target) return values;
     const size = values.length / target;
@@ -373,6 +472,7 @@
     return out;
   }
 
+  // ---------- overview ----------
   async function loadSystem() {
     const s = await (await fetch("/api/v1/system")).json();
     $("hostname").textContent = s.hostname || "?";
@@ -382,7 +482,7 @@
     $("sys-os").textContent = s.os || "—";
     $("sys-kernel").textContent = s.kernel || "—";
     $("sys-arch").textContent = s.arch || "—";
-    $("sys-sample").textContent = `a cada ${s.sample_secs} s`;
+    $("sys-sample").textContent = t("sampleEvery", s.sample_secs);
     $("sys-version").textContent = `v${s.webo_version}`;
   }
   function shortCpu(brand) {
@@ -391,7 +491,7 @@
 
   function renderSnapshot(s) {
     $("cpu-pct").textContent = fmt0(s.cpu_pct);
-    $("load").textContent = s.load_1m.toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+    $("load").textContent = s.load_1m.toLocaleString(LOCALE, { maximumFractionDigits: 2 });
     const [mv, mu, mf] = bytesUnit(s.mem_used);
     $("mem-used").textContent = mf(mv); $("mem-unit").textContent = mu;
     $("mem-pct").textContent = `${fmt0((s.mem_used / s.mem_total) * 100)}%`;
@@ -400,14 +500,14 @@
     const dpct = (s.disk_used / s.disk_total) * 100;
     $("disk-pct").textContent = `${fmt0(dpct)}%`;
     $("disk-bar").style.width = `${Math.min(dpct, 100)}%`;
-    $("disk-free").textContent = `${fmt0((s.disk_total - s.disk_used) / GB)} GB livres`;
+    $("disk-free").textContent = t("freeGb", fmt0((s.disk_total - s.disk_used) / GB));
 
     if (s.temp_c != null) {
       $("temp").textContent = fmt0(s.temp_c);
       $("temp-bar").style.width = `${Math.min(s.temp_c, 100)}%`;
       const hot = s.temp_c >= 85;
       $("temp-status").classList.toggle("status-hot", hot);
-      $("temp-status-txt").textContent = hot ? "quente" : "normal";
+      $("temp-status-txt").textContent = hot ? t("hot") : t("normal");
     } else {
       $("temp-card").hidden = true;
     }
@@ -416,16 +516,14 @@
       $("battery").textContent = s.battery_pct;
       $("battery-bar").style.width = `${s.battery_pct}%`;
       $("battery-status").textContent =
-        s.battery_status === "Charging" ? "carregando" :
-        s.battery_status === "Discharging" ? "na bateria" : "na tomada";
+        s.battery_status === "Charging" ? t("charging") :
+        s.battery_status === "Discharging" ? t("onBattery") : t("onAc");
       if (s.battery_limit_pct != null) {
         $("battery-limit").hidden = false;
-        $("battery-limit").textContent = `limite ${s.battery_limit_pct}%`;
+        $("battery-limit").textContent = t("limitPct", s.battery_limit_pct);
         $("battery-cap").hidden = false;
         $("battery-cap").style.left = `${s.battery_limit_pct}%`;
-        $("battery-note").textContent = "carga travada pra saúde da bateria";
-      } else {
-        $("battery-note").textContent = "";
+        $("battery-note").textContent = t("chargeCapped");
       }
     } else {
       $("battery-card").hidden = true;
@@ -447,96 +545,148 @@
     sparkline("spark-mem", decimate(h.map((x) => x.mem_used)), memTotalHint);
     sparkline("spark-net", decimate(h.map((x) => x.net_rx_bps)));
     const peak = Math.max(...h.map((x) => x.cpu_pct));
-    $("cpu-sub").textContent = `últimas 24 h · pico ${fmt0(peak)}%`;
+    $("cpu-sub").textContent = t("last24hPeak", fmt0(peak));
   }
 
   async function tick() {
     try {
       const s = await (await fetch("/api/v1/snapshot")).json();
       if (s.ts) { renderSnapshot(s); $("live-dot").classList.remove("off"); }
-    } catch { $("live-dot").classList.add("off"); $("uptime").textContent = "sem conexão"; }
+    } catch { $("live-dot").classList.add("off"); $("uptime").textContent = t("noConnection"); }
   }
   async function tickHistory() {
     try { renderHistory(await (await fetch("/api/v1/history")).json()); } catch {}
   }
 
-  // ---------- aba Processos ----------
+  // ---------- processes: icons, sorting, groups ----------
   const KINDS = {
-    node:       { label: "Node.js",           color: "#3fca7c", icon: '<path d="M12 2.8 L20 7.4 L20 16.6 L12 21.2 L4 16.6 L4 7.4 Z"></path>' },
-    postgres:   { label: "PostgreSQL",        color: "#38bdf8", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
-    docker:     { label: "Docker",            color: "#4f8bff", icon: '<path d="M12 3 L20 7.5 L20 16.5 L12 21 L4 16.5 L4 7.5 Z"></path><path d="M4 7.5 L12 12 L20 7.5"></path><path d="M12 12 L12 21"></path>' },
-    cloudflare: { label: "Cloudflare Tunnel", color: "#eab308", icon: '<path d="M7 18a4.5 4.5 0 1 1 .6-8.96 6 6 0 0 1 11.4 1.8A3.6 3.6 0 0 1 18.4 18Z"></path>' },
-    redis:      { label: "Redis",             color: "#e5484d", icon: '<path d="M4 8.5 L12 5 L20 8.5 L12 12 Z"></path><path d="M4 12 L12 15.5 L20 12"></path><path d="M4 15.5 L12 19 L20 15.5"></path>' },
-    python:     { label: "Python",            color: "#38bdf8", icon: '<path d="M12 3c-3 0-4.5 1.2-4.5 3v2h5v1h-7C3.7 9 3 10.8 3 12s.7 3 2.5 3H7v-2.2c0-1.7 1.5-2.8 3-2.8h4c1.4 0 2.5-1.1 2.5-2.5V6c0-1.8-1.5-3-4.5-3Z"></path><path d="M12 21c3 0 4.5-1.2 4.5-3v-2h-5v-1h7c1.8 0 2.5-1.8 2.5-3s-.7-3-2.5-3H17v2.2c0 1.7-1.5 2.8-3 2.8h-4c-1.4 0-2.5 1.1-2.5 2.5V18c0 1.8 1.5 3 4.5 3Z"></path>' },
-    web:        { label: "servidor web",      color: "#7c5cff", icon: '<circle cx="12" cy="12" r="9"></circle><path d="M3 12 L21 12"></path><path d="M12 3c2.5 2.4 3.8 5.6 3.8 9S14.5 18.6 12 21c-2.5-2.4-3.8-5.6-3.8-9S9.5 5.4 12 3Z"></path>' },
-    mysql:      { label: "MySQL",             color: "#f97316", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
-    java:       { label: "Java",              color: "#f97316", icon: '<path d="M8 21c2.7 1 5.3 1 8 0"></path><path d="M7 17.5c3.3 1 6.7 1 10 0"></path><path d="M12 3c2 2-2 3.5 0 5.5S16 11 12 13"></path>' },
-    ruby:       { label: "Ruby",              color: "#e5484d", icon: '<path d="M7 3 L17 3 L21 8 L12 21 L3 8 Z"></path><path d="M3 8 L21 8"></path><path d="M12 21 L8 8 M12 21 L16 8"></path>' },
-    shell:      { label: "shell",             color: "#a2b4d4", icon: '<rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M7 9.5 L10 12 L7 14.5"></path><path d="M12.5 15 L17 15"></path>' },
-    ssh:        { label: "SSH",               color: "#a2b4d4", icon: '<rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path>' },
-    systemd:    { label: "systemd",           color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
-    webo:       { label: "este painel",       color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
-    generic:    { label: "",                  color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
+    node:       { color: "#3fca7c", icon: '<path d="M12 2.8 L20 7.4 L20 16.6 L12 21.2 L4 16.6 L4 7.4 Z"></path>' },
+    postgres:   { color: "#38bdf8", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
+    docker:     { color: "#4f8bff", icon: '<path d="M12 3 L20 7.5 L20 16.5 L12 21 L4 16.5 L4 7.5 Z"></path><path d="M4 7.5 L12 12 L20 7.5"></path><path d="M12 12 L12 21"></path>' },
+    cloudflare: { color: "#eab308", icon: '<path d="M7 18a4.5 4.5 0 1 1 .6-8.96 6 6 0 0 1 11.4 1.8A3.6 3.6 0 0 1 18.4 18Z"></path>' },
+    redis:      { color: "#e5484d", icon: '<path d="M4 8.5 L12 5 L20 8.5 L12 12 Z"></path><path d="M4 12 L12 15.5 L20 12"></path><path d="M4 15.5 L12 19 L20 15.5"></path>' },
+    python:     { color: "#38bdf8", icon: '<path d="M12 3c-3 0-4.5 1.2-4.5 3v2h5v1h-7C3.7 9 3 10.8 3 12s.7 3 2.5 3H7v-2.2c0-1.7 1.5-2.8 3-2.8h4c1.4 0 2.5-1.1 2.5-2.5V6c0-1.8-1.5-3-4.5-3Z"></path><path d="M12 21c3 0 4.5-1.2 4.5-3v-2h-5v-1h7c1.8 0 2.5-1.8 2.5-3s-.7-3-2.5-3H17v2.2c0 1.7-1.5 2.8-3 2.8h-4c-1.4 0-2.5 1.1-2.5 2.5V18c0 1.8 1.5 3 4.5 3Z"></path>' },
+    web:        { color: "#7c5cff", icon: '<circle cx="12" cy="12" r="9"></circle><path d="M3 12 L21 12"></path><path d="M12 3c2.5 2.4 3.8 5.6 3.8 9S14.5 18.6 12 21c-2.5-2.4-3.8-5.6-3.8-9S9.5 5.4 12 3Z"></path>' },
+    mysql:      { color: "#f97316", icon: '<ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path>' },
+    java:       { color: "#f97316", icon: '<path d="M8 21c2.7 1 5.3 1 8 0"></path><path d="M7 17.5c3.3 1 6.7 1 10 0"></path><path d="M12 3c2 2-2 3.5 0 5.5S16 11 12 13"></path>' },
+    ruby:       { color: "#e5484d", icon: '<path d="M7 3 L17 3 L21 8 L12 21 L3 8 Z"></path><path d="M3 8 L21 8"></path><path d="M12 21 L8 8 M12 21 L16 8"></path>' },
+    shell:      { color: "#a2b4d4", icon: '<rect x="3" y="4" width="18" height="16" rx="3"></rect><path d="M7 9.5 L10 12 L7 14.5"></path><path d="M12.5 15 L17 15"></path>' },
+    ssh:        { color: "#a2b4d4", icon: '<rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path>' },
+    systemd:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
+    webo:       { color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
+    generic:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
   };
   function hexSoft(hex, a) {
     const n = parseInt(hex.slice(1), 16);
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
   }
-  function fmtRun(secs) {
-    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
-    if (d > 0) return d === 1 ? "1 dia" : `${d} dias`;
-    if (h > 0) return h === 1 ? "1 hora" : `${h} horas`;
-    if (m > 0) return `${m} min`;
-    return "agora";
-  }
-  function fmtMem(b) {
-    if (b >= GB) return `${fmt1(b / GB)} GB`;
-    return `${fmt0(b / 1024 ** 2)} MB`;
-  }
-  function fmtDisk(bps) {
-    if (bps < 1024) return "—";
-    const [v, u, f] = rateUnit(bps);
-    return `${f(v)} ${u}`;
-  }
-  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 
   let procData = { total: null, processes: [] };
+  let sortKey = "cpu";
+  let sortDir = -1; // -1 desc, 1 asc
+  const expanded = new Set();
+  const SORT_VAL = {
+    name: (p) => p.name.toLowerCase(),
+    uptime: (p) => p.uptime_secs,
+    cpu: (p) => p.cpu_pct,
+    mem: (p) => p.mem_bytes,
+    disk: (p) => p.disk_bps,
+  };
+
+  function renderSortHeads() {
+    document.querySelectorAll(".sort-btn").forEach((b) => {
+      const on = b.dataset.sort === sortKey;
+      b.classList.toggle("on", on);
+      const arrow = on ? ` ${sortDir === -1 ? "↓" : "↑"}` : "";
+      const base = b.dataset.sort === "name"
+        ? (procData.total != null ? t("procHead", fmt0(procData.total)) : t("procHeadPlain"))
+        : b.dataset.sort === "cpu" ? "CPU" : t(b.dataset.i18nCol);
+      b.textContent = base + arrow;
+    });
+  }
+
+  function childRow(c) {
+    return `<div class="proc-grid child-row">
+      <div class="proc-id" style="gap:9px"><span class="n">${esc(c.name)}</span><span class="pid">pid ${c.pid}</span></div>
+      <span class="cell-dim col-time">${fmtRun(c.uptime_secs)}</span>
+      <span class="cell-dim">${c.cpu_pct.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
+      <span class="cell-dim">${fmtMem(c.mem_bytes)}</span>
+      <span class="cell-dim col-disk">${fmtDisk(c.disk_bps)}</span>
+    </div>`;
+  }
+
   function renderProcesses() {
     const q = $("proc-search").value.trim().toLowerCase();
     const all = procData.processes;
-    const shown = q ? all.filter((p) => (p.name + " " + p.cmd).toLowerCase().includes(q)) : all;
+    const shown = q ? all.filter((p) => (p.name + " " + p.cmd).toLowerCase().includes(q)) : all.slice();
+    const val = SORT_VAL[sortKey];
+    shown.sort((a, b) => {
+      const va = val(a), vb = val(b);
+      return (va < vb ? -1 : va > vb ? 1 : 0) * sortDir;
+    });
     const maxCpu = Math.max(...shown.map((p) => p.cpu_pct), 0.1);
     $("proc-rows").innerHTML = shown.map((p) => {
       const k = KINDS[p.kind] || KINDS.generic;
-      const sub = k.label ? `<span class="t">${k.label}</span>` : "";
-      return `<div class="proc-grid proc-row">
-        <div class="proc-id">
-          <div class="proc-icon" style="background:${hexSoft(k.color, p.kind === "generic" ? 0.1 : 0.14)}">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${k.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${k.icon}</svg>
+      const kindLabel = STR[LANG].kinds[p.kind] ?? "";
+      const sub = kindLabel ? `<span class="t">${esc(kindLabel)}</span>` : "";
+      const multi = p.procs > 1;
+      const isOpen = expanded.has(p.pid);
+      const badge = multi ? `<span class="procs-badge">${t("procsBadge", p.procs)}</span>` : "";
+      const chev = multi ? `<svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5 L16 12 L9 19"></path></svg>` : "";
+      const children = multi && isOpen ? `<div class="child-rows">${p.children.map(childRow).join("")}</div>` : "";
+      return `<div>
+        <div class="proc-grid proc-row ${multi ? "expandable" : ""} ${isOpen ? "open" : ""}" ${multi ? `data-pid="${p.pid}" role="button" tabindex="0"` : ""}>
+          <div class="proc-id">
+            ${chev}
+            <div class="proc-icon" style="background:${hexSoft(k.color, p.kind === "generic" ? 0.1 : 0.14)}">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${k.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${k.icon}</svg>
+            </div>
+            <div class="proc-names">
+              <div class="proc-title"><span class="n">${esc(p.name)}</span>${sub}${badge}</div>
+              <span class="proc-cmd">${esc(p.cmd || "")}</span>
+            </div>
           </div>
-          <div class="proc-names">
-            <div class="proc-title"><span class="n">${esc(p.name)}</span>${sub}</div>
-            <span class="proc-cmd">${esc(p.cmd || "")}</span>
+          <span class="cell-dim col-time">${fmtRun(p.uptime_secs)}</span>
+          <div class="cpu-cell">
+            <span class="cell-num">${p.cpu_pct.toLocaleString(LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
+            <div class="mini-track"><div class="mini-fill" style="width:${Math.min((p.cpu_pct / maxCpu) * 100, 100)}%"></div></div>
           </div>
+          <span class="cell-num">${fmtMem(p.mem_bytes)}</span>
+          <span class="cell-dim col-disk">${fmtDisk(p.disk_bps)}</span>
         </div>
-        <span class="cell-dim col-time">${fmtRun(p.uptime_secs)}</span>
-        <div class="cpu-cell">
-          <span class="cell-num">${p.cpu_pct.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%</span>
-          <div class="mini-track"><div class="mini-fill" style="width:${Math.min((p.cpu_pct / maxCpu) * 100, 100)}%"></div></div>
-        </div>
-        <span class="cell-num">${fmtMem(p.mem_bytes)}</span>
-        <span class="cell-dim col-disk">${fmtDisk(p.disk_bps)}</span>
+        ${children}
       </div>`;
     }).join("");
-    const quiet = procData.total != null ? procData.total - all.length : null;
-    $("proc-head").textContent = procData.total != null
-      ? `Os que mais consomem · ${fmt0(procData.total)} processos no total` : "Os que mais consomem";
+    renderSortHeads();
     $("proc-foot-txt").textContent = q
-      ? `${shown.length} de ${all.length} na busca por "${q}"`
-      : quiet != null && quiet > 0
-        ? `mostrando os ${all.length} mais ativos · o resto está quieto`
-        : `mostrando ${all.length} processos`;
+      ? t("footSearch", shown.length, all.length, q)
+      : procData.total != null && procData.total > all.length
+        ? t("footShowing", all.length)
+        : t("footShowingAll", all.length);
   }
+
+  function toggleRow(target) {
+    const row = target.closest(".proc-row.expandable");
+    if (!row) return false;
+    const pid = Number(row.dataset.pid);
+    if (expanded.has(pid)) expanded.delete(pid); else expanded.add(pid);
+    renderProcesses();
+    return true;
+  }
+  $("proc-rows").addEventListener("click", (ev) => { toggleRow(ev.target); });
+  $("proc-rows").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    if (toggleRow(ev.target)) ev.preventDefault();
+  });
+  document.querySelectorAll(".sort-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      const key = b.dataset.sort;
+      if (sortKey === key) sortDir = -sortDir;
+      else { sortKey = key; sortDir = key === "name" ? 1 : -1; }
+      renderProcesses();
+    });
+  });
+
   async function tickProcesses() {
     if ($("view-processes").hidden) return;
     try {
@@ -546,15 +696,16 @@
   }
   $("proc-search").addEventListener("input", renderProcesses);
 
+  // ---------- tabs ----------
   const tabs = [
     { btn: "tab-overview", view: "view-overview" },
     { btn: "tab-processes", view: "view-processes" },
   ];
   tabs.forEach(({ btn, view }) => {
     $(btn).addEventListener("click", () => {
-      tabs.forEach((t) => {
-        $(t.btn).classList.toggle("on", t.btn === btn);
-        $(t.view).hidden = t.view !== view;
+      tabs.forEach((tb) => {
+        $(tb.btn).classList.toggle("on", tb.btn === btn);
+        $(tb.view).hidden = tb.view !== view;
       });
       $("proc-search-box").hidden = view !== "view-processes";
       if (view === "view-processes") tickProcesses();

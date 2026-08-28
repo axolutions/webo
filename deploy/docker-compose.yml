@@ -15,3 +15,5 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # contagem de containers (opcional)
       - /proc/net/dev:/host/proc_net_dev:ro            # taxas de rede do host (opcional)
       - /sys:/sys:ro                                   # temperatura e bateria (opcional)
+      - /etc/hostname:/host/etc/hostname:ro            # nome real do host (opcional)
+      - /etc/os-release:/host/etc/os-release:ro        # SO real do host (opcional)

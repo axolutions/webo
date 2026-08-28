@@ -9,6 +9,29 @@ fn now_ts() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
+/// Em container, o hostname/os são os do container; os mounts opcionais
+/// em /host/etc/* (ver compose) devolvem os do host.
+fn host_hostname() -> String {
+    if let Ok(h) = std::env::var("WEBO_HOSTNAME") {
+        return h;
+    }
+    if let Ok(h) = fs::read_to_string("/host/etc/hostname") {
+        return h.trim().to_string();
+    }
+    System::host_name().unwrap_or_default()
+}
+
+fn host_os() -> String {
+    if let Ok(text) = fs::read_to_string("/host/etc/os-release") {
+        for line in text.lines() {
+            if let Some(name) = line.strip_prefix("PRETTY_NAME=") {
+                return name.trim_matches('"').to_string();
+            }
+        }
+    }
+    System::long_os_version().unwrap_or_default()
+}
+
 /// Caminho do /proc/net/dev. Em container, monte o do host e aponte
 /// WEBO_NET_DEV pra ele; sem isso, as taxas refletem só o container.
 fn net_dev_path() -> String {
@@ -117,8 +140,8 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
         let (_, disk_total) = root_disk(&mut disks);
         let mut st = state.write().await;
         st.system = SystemInfo {
-            hostname: System::host_name().unwrap_or_default(),
-            os: System::long_os_version().unwrap_or_default(),
+            hostname: host_hostname(),
+            os: host_os(),
             kernel: System::kernel_version().unwrap_or_default(),
             arch: System::cpu_arch(),
             cpu_brand,

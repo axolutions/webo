@@ -1,0 +1,31 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: "🧪 Tests + coverage gate (90%)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests with coverage
+        # main.rs is the thin binary shell (bind + spawn); everything else
+        # must keep line coverage at or above 90%.
+        run: |
+          cargo llvm-cov --all-features \
+            --ignore-filename-regex 'src/main\.rs' \
+            --fail-under-lines 90 \
+            --summary-only

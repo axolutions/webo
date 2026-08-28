@@ -11,8 +11,14 @@ services:
     restart: unless-stopped
     environment:
       - WEBO_NET_DEV=/host/proc_net_dev
+      - WEBO_DB_PATH=/data/webo.db
     volumes:
+      - webo-data:/data                                # project metadata (SQLite)
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # project discovery + container metrics (optional)
       - /proc/net/dev:/host/proc_net_dev:ro            # host network rates (optional)
       - /sys:/sys:ro                                   # temperature and battery (optional)
       - /etc/hostname:/host/etc/hostname:ro            # real host name (optional)
       - /etc/os-release:/host/etc/os-release:ro        # real host OS (optional)
+
+volumes:
+  webo-data:

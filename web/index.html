@@ -193,6 +193,36 @@
     .proc-grid.head .sort-btn[data-sort="name"] { flex: 1 1 100%; }
     .child-row { padding-left: 24px; }
   }
+  #view-projects, #view-project-detail { margin-top: 18px; }
+  .proj-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  .proj-card {
+    display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; border-radius: 15px;
+    background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh);
+    backdrop-filter: blur(14px); cursor: pointer; min-width: 0;
+    transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.25, 1), border-color 0.16s;
+  }
+  .proj-card:hover { transform: translateY(-2px); border-color: var(--stroke-strong); }
+  .proj-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; flex: none; font-weight: 700; font-size: 16px; background: var(--accent-soft); color: var(--accent); }
+  .src-badge { font-size: 10.5px; font-weight: 600; color: var(--text-2); padding: 1px 7px; border-radius: 999px; background: var(--surface-3); white-space: nowrap; }
+  .proj-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .proj-stats .v { font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .deploy-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); padding-top: 12px; border-top: 1px solid var(--stroke); flex-wrap: wrap; }
+  .detail-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+  .tile { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; border-radius: 15px; background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh); backdrop-filter: blur(14px); min-width: 0; }
+  .tile .big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .tile .unit { font-size: 15px; font-weight: 600; color: var(--text-3); }
+  .detail-cols { display: grid; grid-template-columns: 1.25fr 1fr; gap: 16px; margin-top: 16px; }
+  .dcard { display: flex; flex-direction: column; border-radius: 15px; background: var(--card); border: 1px solid var(--stroke); box-shadow: var(--sh); backdrop-filter: blur(14px); overflow: hidden; }
+  .dcard-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--stroke); }
+  .drow { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--stroke); }
+  .drow:first-of-type { border-top: 0; }
+  .back-btn { display: grid; place-items: center; width: 34px; height: 34px; border: 0; background: transparent; color: var(--text-3); cursor: pointer; border-radius: 10px; padding: 0; }
+  .back-btn:hover { color: var(--text); background: var(--surface-2); }
+  .mini-dot2 { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .repo-chip { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 13px; border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); }
+  .empty-note { padding: 22px 20px; font-size: 13px; color: var(--text-3); text-align: center; }
+  @media (max-width: 900px) { .proj-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-cols { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 620px) { .proj-grid { grid-template-columns: minmax(0, 1fr); } .detail-tiles { grid-template-columns: minmax(0, 1fr); } }
   footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
 </style>
 </head>
@@ -220,6 +250,7 @@
     <div class="seg" role="tablist">
       <button class="seg-btn on" id="tab-overview" role="tab" data-i18n="tabOverview">Overview</button>
       <button class="seg-btn" id="tab-processes" role="tab" data-i18n="tabProcesses">Processes</button>
+      <button class="seg-btn" id="tab-projects" role="tab" data-i18n="tabProjects">Projects</button>
     </div>
     <div class="search-box" id="proc-search-box" hidden>
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20 L16.5 16.5"></path></svg>
@@ -323,6 +354,13 @@
     </div>
   </section>
 
+  <section id="view-projects" hidden>
+    <div class="proj-grid" id="proj-cards"></div>
+    <div class="empty-note" id="proj-empty" hidden></div>
+  </section>
+
+  <section id="view-project-detail" hidden></section>
+
   <footer data-i18n="footer">webo · self-hosted health panel</footer>
 </div>
 
@@ -356,6 +394,22 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "web server", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "" },
+      tabProjects: "Projects",
+      registered: "registered", discovered: "discovered",
+      onAir: "live", stopped: "stopped",
+      containersLbl: "Containers", noRepo: "no repository connected",
+      deployAgo: (w) => `deploy ${w}`, agoW: (w) => `${w} ago`,
+      noProjects: "No projects yet — webo discovers whatever runs on Docker.",
+      liveContainers: "Containers · live", updatesEvery: (n) => `updates every ${n} s`,
+      buildsTitle: "Builds & deploys", viaActions: "via GitHub Actions",
+      versionsTitle: "Image versions", ghcr: "ghcr.io", rollbackSoon: "rollback · soon",
+      failedAt: "failed", weightTitle: "Weight on the server",
+      imageLbl: "image", volumesLbl: "volumes", totalLbl: "total", sizeTotal: "Total size",
+      cpuIdle: "almost asleep", cpuCruise: "cruising", cpuBusy: "working hard",
+      ofMachine: (p) => `${p}% of the machine`, rwNow: "read + write right now",
+      imgPlusVol: "image + volumes on the server",
+      noBuilds: "no builds yet — connect a repo and set WEBO_GITHUB_TOKEN",
+      noVersions: "no versions yet",
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -384,6 +438,22 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "servidor web", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "" },
+      tabProjects: "Projetos",
+      registered: "registrado", discovered: "descoberto",
+      onAir: "no ar", stopped: "parado",
+      containersLbl: "Containers", noRepo: "sem repositório conectado",
+      deployAgo: (w) => `deploy ${w}`, agoW: (w) => `há ${w}`,
+      noProjects: "Nenhum projeto ainda — o webo descobre o que rodar no Docker.",
+      liveContainers: "Containers · ao vivo", updatesEvery: (n) => `atualiza a cada ${n} s`,
+      buildsTitle: "Builds e deploys", viaActions: "via GitHub Actions",
+      versionsTitle: "Versões da imagem", ghcr: "ghcr.io", rollbackSoon: "rollback · em breve",
+      failedAt: "falhou", weightTitle: "Peso no servidor",
+      imageLbl: "imagem", volumesLbl: "volumes", totalLbl: "total", sizeTotal: "Tamanho total",
+      cpuIdle: "quase dormindo", cpuCruise: "tranquilo", cpuBusy: "trabalhando duro",
+      ofMachine: (p) => `${p}% da máquina`, rwNow: "leitura + escrita agora",
+      imgPlusVol: "imagem + volumes no servidor",
+      noBuilds: "sem builds ainda — conecte um repo e configure WEBO_GITHUB_TOKEN",
+      noVersions: "sem versões ainda",
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -703,27 +773,266 @@
   }
   $("proc-search").addEventListener("input", renderProcesses);
 
+  // ---------- projects ----------
+  const relTime = (secs) => {
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return d === 1 ? t("dayOne") : t("days", d);
+    if (h > 0) return h === 1 ? t("hourOne") : t("hours", h);
+    if (m > 0) return t("mins", m);
+    return t("now");
+  };
+  const nowSecs = () => Math.floor(Date.now() / 1000);
+  let currentProject = null;
+
+  function sparkSvgInner(values, max, W, H) {
+    if (!values.length) return "";
+    const PAD = 5;
+    const top = max ?? Math.max(...values, 1e-9);
+    const pts = values.map((v, i) => {
+      const x = values.length === 1 ? W : (i / (values.length - 1)) * W;
+      const y = H - PAD - Math.min(v / top, 1) * (H - 2 * PAD);
+      return [x, y];
+    });
+    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    const [lx, ly] = pts[pts.length - 1];
+    return `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="rgba(140,165,215,0.12)" stroke-width="1"></line>` +
+      `<path d="${line} L${W},${H} L0,${H} Z" fill="rgba(79,139,255,0.16)"></path>` +
+      `<path d="${line}" fill="none" stroke="#4f8bff" stroke-width="2" stroke-linecap="round"></path>` +
+      `<circle cx="${lx}" cy="${ly}" r="3" fill="#4f8bff" stroke="var(--spark-ring)" stroke-width="2"></circle>`;
+  }
+
+  function renderProjectList(data) {
+    const list = data.projects || [];
+    $("proj-empty").hidden = list.length > 0;
+    if (!list.length) $("proj-empty").textContent = t("noProjects");
+    $("proj-cards").innerHTML = list.map((p) => {
+      const repo = p.repo
+        ? `<span style="font-family:var(--mono);font-size:12px">${esc(p.repo)}</span>`
+        : `<span style="color:var(--text-3)">${t("noRepo")}</span>`;
+      const deploy = p.last_build
+        ? `<span class="mini-dot2" style="background:${p.last_build.conclusion === "success" ? "var(--ok)" : "var(--danger)"}"></span>
+           <span>${t("deployAgo", t("agoW", relTime(nowSecs() - p.last_build.created_at)))}</span>
+           <span style="font-family:var(--mono);font-size:11px;color:var(--text-3)">${esc(p.last_build.commit_sha)}</span>`
+        : `<span style="color:var(--text-3)">—</span>`;
+      const version = p.current_version
+        ? `<span class="mono-badge" style="margin-left:auto">${esc(p.current_version)}</span>` : "";
+      return `<div class="proj-card" data-slug="${esc(p.slug)}" role="button" tabindex="0">
+        <div style="display:flex;align-items:center;gap:13px">
+          <div class="proj-icon">${esc((p.name[0] || "?").toLowerCase())}</div>
+          <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-weight:600;font-size:15px">${esc(p.name)}</span>
+              <span class="mini-dot2" style="background:${p.running ? "var(--ok)" : "var(--text-3)"};box-shadow:${p.running ? "0 0 0 3px var(--ok-soft)" : "none"}"></span>
+            </div>
+            ${p.domain ? `<span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3)">${esc(p.domain)}</span>` : ""}
+          </div>
+          <span class="src-badge" style="margin-left:auto">${t(p.source)}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2)">${repo}</div>
+        <div class="proj-stats">
+          <div><div class="label" style="letter-spacing:0.06em">CPU</div><div class="v">${p.cpu_pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%</div></div>
+          <div><div class="label" style="letter-spacing:0.06em">${t("memory")}</div><div class="v">${fmtMem(p.mem_bytes)}</div></div>
+          <div><div class="label" style="letter-spacing:0.06em">${t("containersLbl")}</div><div class="v">${p.containers}</div></div>
+        </div>
+        <div class="deploy-line">${deploy}${version}</div>
+      </div>`;
+    }).join("");
+  }
+
+  function cpuMood(pct) {
+    if (pct < 1) return t("cpuIdle");
+    if (pct < 20) return t("cpuCruise");
+    return t("cpuBusy");
+  }
+
+  function renderProjectDetail(d) {
+    const hist = d.history || [];
+    const cpuSeries = decimate(hist.map((x) => x.cpu_pct));
+    const memSeries = decimate(hist.map((x) => x.mem_bytes));
+    const memTotal = machineMem || Math.max(...hist.map((x) => x.mem_bytes), 1) * 1.4;
+    const total = (d.image_bytes || 0) + (d.volume_bytes || 0);
+    const repo = d.repo_owner && d.repo_name ? `${d.repo_owner}/${d.repo_name}` : null;
+    const containers = (d.containers || []).map((c) => `
+      <div class="drow">
+        <span class="mini-dot2" style="background:${c.state === "running" ? "var(--ok)" : "var(--danger)"}"></span>
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
+          <span style="font-weight:600;font-size:13.5px">${esc(c.name)}</span>
+          <span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)} · ${t("agoW", relTime(c.uptime_secs))}</span>
+        </div>
+        <div style="display:flex;gap:18px;flex:none">
+          <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${c.cpu_pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%</span><span class="sub">CPU</span></div>
+          <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${fmtMem(c.mem_bytes)}</span><span class="sub">RAM</span></div>
+          <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${fmtDisk(c.disk_bps)}</span><span class="sub">${t("disk")}</span></div>
+        </div>
+      </div>`).join("");
+    const builds = (d.builds || []).map((b) => {
+      const ok = b.conclusion === "success";
+      const running = b.status !== "completed";
+      const failNote = !ok && !running ? ` · ${t("failedAt")}` : "";
+      return `<div class="drow">
+        <span class="mini-dot2" style="background:${running ? "var(--accent)" : ok ? "var(--ok)" : "var(--danger)"}"></span>
+        <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
+          <span style="font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(b.commit_msg)}</span>
+          <span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3)">${esc(b.commit_sha)} · ${esc(b.branch)}${failNote}</span>
+        </div>
+        <span class="cell-dim">${b.duration_secs}s</span>
+        <span class="sub" style="width:64px;text-align:right">${t("agoW", relTime(nowSecs() - b.created_at))}</span>
+      </div>`;
+    }).join("") || `<div class="empty-note">${t("noBuilds")}</div>`;
+    const versions = (d.versions || []).map((v) => `
+      <div class="drow">
+        <div style="display:flex;flex-direction:column;gap:2px;flex:1">
+          <span style="font-family:var(--mono);font-size:12.5px;font-weight:500">${esc(v.tag)}</span>
+          <span class="sub">${t("agoW", relTime(nowSecs() - v.created_at))}${v.size_bytes ? ` · ${fmtMem(v.size_bytes)}` : ""}</span>
+        </div>
+        ${v.current
+          ? `<span class="mono-badge" style="color:var(--ok);background:var(--ok-soft)">${t("onAir")}</span>`
+          : `<span class="sub" style="color:var(--text-3)" title="${t("rollbackSoon")}">${t("rollbackSoon")}</span>`}
+      </div>`).join("") || `<div class="empty-note">${t("noVersions")}</div>`;
+
+    $("view-project-detail").innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="back-btn" id="proj-back" aria-label="back">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5 L8 12 L15 19"></path></svg>
+          </button>
+          <div class="proj-icon" style="width:42px;height:42px;font-size:17px">${esc((d.name[0] || "?").toLowerCase())}</div>
+          <div style="display:flex;flex-direction:column;gap:3px">
+            <div style="display:flex;align-items:center;gap:9px">
+              <span style="font-size:19px;font-weight:700;letter-spacing:-0.02em">${esc(d.name)}</span>
+              <span class="mini-dot2" style="background:${d.running ? "var(--ok)" : "var(--text-3)"};box-shadow:${d.running ? "0 0 0 3px var(--ok-soft)" : "none"}"></span>
+              <span style="font-size:12.5px;color:${d.running ? "var(--ok)" : "var(--text-3)"}">${d.running ? t("onAir") : t("stopped")}</span>
+            </div>
+            ${d.domain ? `<span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">${esc(d.domain)}</span>` : ""}
+          </div>
+        </div>
+        ${repo ? `<div class="repo-chip">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M9 19c-4 1.5-4-2-6-2"></path></svg>
+          <span style="font-family:var(--mono);font-size:12px">${esc(repo)}</span>
+        </div>` : ""}
+      </div>
+
+      <div class="detail-tiles" style="margin-top:18px">
+        <div class="tile">
+          <span class="label">CPU</span>
+          <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${d.cpu_pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}</span><span class="unit">%</span></div>
+          <svg width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none" style="display:block">${sparkSvgInner(cpuSeries, Math.max(...cpuSeries, 5), 300, 34)}</svg>
+          <span class="sub">${cpuMood(d.cpu_pct)}</span>
+        </div>
+        <div class="tile">
+          <span class="label">${t("memory")}</span>
+          <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${fmtMem(d.mem_bytes).split(" ")[0]}</span><span class="unit">${fmtMem(d.mem_bytes).split(" ")[1]}</span></div>
+          <svg width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none" style="display:block">${sparkSvgInner(memSeries, Math.max(...memSeries, 1) * 1.4, 300, 34)}</svg>
+          <span class="sub">${machineMem ? t("ofMachine", ((d.mem_bytes / machineMem) * 100).toLocaleString(LOCALE, { maximumFractionDigits: 1 })) : ""}</span>
+        </div>
+        <div class="tile">
+          <span class="label">${t("disk")}</span>
+          <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${fmtDisk(d.disk_bps) === "—" ? "0" : fmtDisk(d.disk_bps).split(" ")[0]}</span><span class="unit">${fmtDisk(d.disk_bps) === "—" ? "KB/s" : fmtDisk(d.disk_bps).split(" ")[1]}</span></div>
+          <span class="sub" style="margin-top:auto">${t("rwNow")}</span>
+        </div>
+        <div class="tile">
+          <span class="label">${t("sizeTotal")}</span>
+          <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${fmtMem(total).split(" ")[0]}</span><span class="unit">${fmtMem(total).split(" ")[1]}</span></div>
+          <span class="sub" style="margin-top:auto">${t("imgPlusVol")}</span>
+        </div>
+      </div>
+
+      <div class="detail-cols">
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("liveContainers")}</span><span class="sub">${t("updatesEvery", 15)}</span></div>
+            ${containers || `<div class="empty-note">—</div>`}
+          </div>
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("buildsTitle")}</span><span class="sub">${t("viaActions")}</span></div>
+            ${builds}
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("versionsTitle")}</span><span class="sub">${t("ghcr")}</span></div>
+            ${versions}
+          </div>
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("weightTitle")}</span></div>
+            <div style="display:flex;flex-direction:column;gap:12px;padding:16px 20px">
+              <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text-2)">${t("imageLbl")}</span><span class="cell-num">${fmtMem(d.image_bytes || 0)}</span></div>
+              <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:var(--text-2)">${t("volumesLbl")}</span><span class="cell-num">${fmtMem(d.volume_bytes || 0)}</span></div>
+              <div style="display:flex;justify-content:space-between;font-size:13px;padding-top:10px;border-top:1px solid var(--stroke)"><span style="font-weight:600">${t("totalLbl")}</span><span class="cell-num">${fmtMem(total)}</span></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    $("proj-back").addEventListener("click", () => {
+      currentProject = null;
+      $("view-project-detail").hidden = true;
+      $("view-projects").hidden = false;
+      tickProjects();
+    });
+  }
+
+  let machineMem = 0;
+  async function tickProjects() {
+    if (currentProject) {
+      try {
+        const d = await (await fetch(`/api/v1/projects/${encodeURIComponent(currentProject)}`)).json();
+        if (!$("view-project-detail").hidden) renderProjectDetail(d);
+      } catch {}
+      return;
+    }
+    if ($("view-projects").hidden) return;
+    try {
+      renderProjectList(await (await fetch("/api/v1/projects")).json());
+    } catch {}
+  }
+  async function openProject(slug) {
+    currentProject = slug;
+    $("view-projects").hidden = true;
+    $("view-project-detail").hidden = false;
+    try {
+      renderProjectDetail(await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}`)).json());
+    } catch {}
+  }
+  $("proj-cards").addEventListener("click", (ev) => {
+    const card = ev.target.closest(".proj-card");
+    if (card) openProject(card.dataset.slug);
+  });
+  $("proj-cards").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const card = ev.target.closest(".proj-card");
+    if (card) { ev.preventDefault(); openProject(card.dataset.slug); }
+  });
+
   // ---------- tabs ----------
   const tabs = [
-    { btn: "tab-overview", view: "view-overview" },
-    { btn: "tab-processes", view: "view-processes" },
+    { btn: "tab-overview", views: ["view-overview"] },
+    { btn: "tab-processes", views: ["view-processes"] },
+    { btn: "tab-projects", views: ["view-projects", "view-project-detail"] },
   ];
-  tabs.forEach(({ btn, view }) => {
+  const allViews = ["view-overview", "view-processes", "view-projects", "view-project-detail"];
+  tabs.forEach(({ btn, views }) => {
     $(btn).addEventListener("click", () => {
-      tabs.forEach((tb) => {
-        $(tb.btn).classList.toggle("on", tb.btn === btn);
-        $(tb.view).hidden = tb.view !== view;
-      });
-      $("proc-search-box").hidden = view !== "view-processes";
-      if (view === "view-processes") tickProcesses();
+      tabs.forEach((tb) => $(tb.btn).classList.toggle("on", tb.btn === btn));
+      allViews.forEach((v) => { $(v).hidden = true; });
+      if (btn === "tab-projects" && currentProject) {
+        $("view-project-detail").hidden = false;
+      } else {
+        $(views[0]).hidden = false;
+        if (btn !== "tab-projects") currentProject = null;
+      }
+      $("proc-search-box").hidden = btn !== "tab-processes";
+      if (btn === "tab-processes") tickProcesses();
+      if (btn === "tab-projects") tickProjects();
     });
   });
 
-  loadSystem().catch(() => {});
-  tick(); tickHistory(); tickProcesses();
+  loadSystem().then(() => {}).catch(() => {});
+  fetch("/api/v1/system").then((r) => r.json()).then((s) => { machineMem = s.mem_total || 0; }).catch(() => {});
+  tick(); tickHistory(); tickProcesses(); tickProjects();
   setInterval(tick, 15000);
   setInterval(tickHistory, 60000);
   setInterval(tickProcesses, 15000);
+  setInterval(tickProjects, 15000);
 })();
 </script>
 </body>

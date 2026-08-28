@@ -5,6 +5,11 @@ services:
   webo:
     image: ghcr.io/axolutions/webo:latest
     container_name: webo
+    labels:
+      webo.domain: webo.axolutions.com.br
+    env_file:
+      - path: .env
+        required: false
     networks:
       - homelab
 

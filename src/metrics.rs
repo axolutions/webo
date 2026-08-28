@@ -81,12 +81,44 @@ pub struct SystemInfo {
     pub sample_secs: u64,
 }
 
+/// Live view of one container belonging to a project.
+#[derive(Clone, Serialize)]
+pub struct ProjectContainer {
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub uptime_secs: u64,
+    pub cpu_pct: f32,
+    pub mem_bytes: u64,
+    pub disk_bps: u64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub struct ProjectSample {
+    pub ts: u64,
+    pub cpu_pct: f32,
+    pub mem_bytes: u64,
+}
+
+/// Live (in-memory) aggregate for a project: containers + 24 h history.
+#[derive(Clone, Default, Serialize)]
+pub struct ProjectLive {
+    pub containers: Vec<ProjectContainer>,
+    pub cpu_pct: f32,
+    pub mem_bytes: u64,
+    pub disk_bps: u64,
+    pub image_bytes: u64,
+    pub volume_bytes: u64,
+    pub history: VecDeque<ProjectSample>,
+}
+
 pub struct State {
     pub snapshot: Snapshot,
     pub system: SystemInfo,
     pub history: VecDeque<Sample>,
     pub history_cap: usize,
     pub processes: Vec<ProcessGroup>,
+    pub projects_live: std::collections::HashMap<String, ProjectLive>,
 }
 
 impl State {
@@ -97,6 +129,7 @@ impl State {
             history: VecDeque::with_capacity(history_cap),
             history_cap,
             processes: Vec::new(),
+            projects_live: std::collections::HashMap::new(),
         }
     }
 

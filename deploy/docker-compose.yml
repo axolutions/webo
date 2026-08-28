@@ -1,5 +1,6 @@
 # webo — run with: docker compose -f deploy/docker-compose.yml up -d --build
 # Panel at http://<server>:5050
+name: webo
 services:
   webo:
     build:

@@ -2,7 +2,7 @@
 name = "webo"
 version = "0.1.0"
 edition = "2021"
-description = "Painel de saúde de servidor — CPU, RAM, disco, temperatura, rede — leve e self-hosted."
+description = "Self-hosted server health panel — CPU, RAM, disk, temperature, network — featherweight."
 license = "MIT"
 
 [dependencies]
@@ -11,7 +11,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.33"
-bollard = "0.18"
 
 [profile.release]
 strip = true

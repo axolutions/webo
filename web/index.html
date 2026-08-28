@@ -140,7 +140,6 @@
     </div>
     <div class="chips">
       <div class="chip"><span class="dot" id="live-dot"></span><span id="uptime">carregando…</span></div>
-      <div class="chip" id="containers-chip" hidden><span id="containers">—</span></div>
       <button class="icon-btn" id="theme-btn" title="Alternar tema" aria-label="Alternar tema">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
       </button>
@@ -367,10 +366,6 @@
     $("net-tx").textContent = tf(tv); $("net-tx-unit").textContent = tu;
 
     $("uptime").textContent = fmtUptime(s.uptime_secs);
-    if (s.containers_running != null) {
-      $("containers-chip").hidden = false;
-      $("containers").textContent = `${s.containers_running} containers ativos`;
-    }
     $("sys-procs").textContent = s.processes != null ? fmt0(s.processes) : "—";
   }
 

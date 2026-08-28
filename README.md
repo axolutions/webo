@@ -1,56 +1,58 @@
 # webo
 
-Painel de saúde pro seu servidor — CPU, memória, disco, temperatura, bateria e
-rede num painel só, leve de verdade (um binário Rust, < 50 MB de RAM), com API
-JSON pronta pra automação e agentes (MCP).
+A health panel for your server — CPU, memory, disk, temperature, battery and
+network on a single screen, genuinely lightweight (one Rust binary, < 50 MB of
+RAM), with a JSON API ready for automation and agents (MCP).
 
 ```
 docker compose -f deploy/docker-compose.yml up -d --build
-# painel em http://seu-servidor:5050
+# panel at http://your-server:5050
 ```
 
-## O que ele mostra
+## What it shows
 
-- **CPU** — uso, load, sparkline das últimas 24 h
-- **Memória** — uso/total, sparkline
-- **Disco** — uso/total/livre do filesystem raiz
-- **Temperatura** — CPU, com alerta visual a 85 °C
-- **Bateria** — carga, status e limite de carga (notebooks-servidor)
-- **Rede** — taxas de download/upload
-- **Sistema** — SO, kernel, arquitetura, processos, containers ativos
+- **CPU** — usage, load, 24 h sparkline
+- **Memory** — used/total, sparkline
+- **Disk** — used/total/free of the root filesystem
+- **Temperature** — CPU, with a visual alert at 85 °C
+- **Battery** — charge, status and charge limit (laptop servers)
+- **Network** — download/upload rates
+- **System** — OS, kernel, architecture, process count
 
-Cartões de métricas indisponíveis no seu hardware (bateria num datacenter,
-por exemplo) somem sozinhos.
+Cards for metrics your hardware doesn't have (a battery in a datacenter, say)
+simply disappear.
 
-## API (o mesmo contrato que o painel usa)
+## API (the same contract the panel uses)
 
-| Endpoint | Retorna |
+| Endpoint | Returns |
 |---|---|
-| `GET /api/v1/snapshot` | tudo do momento atual |
-| `GET /api/v1/history?minutes=1440` | série de CPU/RAM/rede (amostra a cada 15 s, 24 h em memória) |
-| `GET /api/v1/system` | identidade da máquina (hostname, SO, kernel, hardware) |
+| `GET /api/v1/snapshot` | everything about the current moment |
+| `GET /api/v1/history?minutes=1440` | CPU/RAM/network series (15 s samples, 24 h in memory) |
+| `GET /api/v1/system` | machine identity (hostname, OS, kernel, hardware) |
 | `GET /healthz` | `ok` |
 
-Nada é exclusivo da UI: tudo que o painel mostra sai desses endpoints — é por
-eles que um servidor MCP (ou qualquer automação) enxerga a máquina.
+Nothing is UI-only: everything the panel shows comes from these endpoints —
+they are how an MCP server (or any automation) sees the machine.
 
-## Configuração
+## Configuration
 
-| Env | Padrão | O quê |
+| Env | Default | What |
 |---|---|---|
-| `WEBO_BIND` | `0.0.0.0:5050` | endereço de escuta |
-| `WEBO_SAMPLE_SECS` | `15` | intervalo de coleta |
-| `WEBO_NET_DEV` | `/proc/net/dev` | fonte das taxas de rede (em container, monte a do host) |
+| `WEBO_BIND` | `0.0.0.0:5050` | listen address |
+| `WEBO_SAMPLE_SECS` | `15` | sampling interval |
+| `WEBO_NET_DEV` | `/proc/net/dev` | network rates source (in a container, mount the host's) |
+| `WEBO_HOSTNAME` | — | overrides the reported hostname |
 
-Os mounts do compose (`docker.sock`, `/sys`, `/proc/net/dev`) são opcionais —
-sem eles o webo continua funcionando, só esconde as métricas correspondentes.
+The compose mounts (`/sys`, `/proc/net/dev`, `/etc/hostname`, `/etc/os-release`)
+are optional — without them webo still works and just hides the corresponding
+metrics.
 
-## Segurança
+## Security
 
-O webo **não tem autenticação própria** (é observador, read-only). Não exponha
-a porta 5050 direto na internet: ponha na frente um proxy com auth,
-Cloudflare Access, ou acesse por VPN/rede privada.
+webo has **no built-in authentication** (it is a read-only observer). Don't
+expose port 5050 directly to the internet: put an authenticating proxy,
+Cloudflare Access, or a VPN/private network in front of it.
 
-## Licença
+## License
 
 MIT

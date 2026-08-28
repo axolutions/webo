@@ -1,5 +1,5 @@
-# webo — suba com: docker compose -f deploy/docker-compose.yml up -d --build
-# Painel em http://<servidor>:5050
+# webo — run with: docker compose -f deploy/docker-compose.yml up -d --build
+# Panel at http://<server>:5050
 services:
   webo:
     build:
@@ -7,13 +7,12 @@ services:
       dockerfile: deploy/Dockerfile
     ports:
       - "5050:5050"
-    pid: host                # processos e CPU/memória do host, não do container
+    pid: host                # host processes and CPU/memory, not the container's
     restart: unless-stopped
     environment:
       - WEBO_NET_DEV=/host/proc_net_dev
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # contagem de containers (opcional)
-      - /proc/net/dev:/host/proc_net_dev:ro            # taxas de rede do host (opcional)
-      - /sys:/sys:ro                                   # temperatura e bateria (opcional)
-      - /etc/hostname:/host/etc/hostname:ro            # nome real do host (opcional)
-      - /etc/os-release:/host/etc/os-release:ro        # SO real do host (opcional)
+      - /proc/net/dev:/host/proc_net_dev:ro            # host network rates (optional)
+      - /sys:/sys:ro                                   # temperature and battery (optional)
+      - /etc/hostname:/host/etc/hostname:ro            # real host name (optional)
+      - /etc/os-release:/host/etc/os-release:ro        # real host OS (optional)

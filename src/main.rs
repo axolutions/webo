@@ -19,14 +19,14 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(15);
-    // 24 h de histórico
+    // 24 h of history
     let cap = (24 * 3600 / sample_secs.max(1)) as usize;
 
     let state: Shared = Arc::new(RwLock::new(State::new(cap)));
     tokio::spawn(collector::run(state.clone(), sample_secs));
 
-    // API versionada: é este contrato que o servidor MCP vai consumir depois —
-    // tudo que o painel mostra sai daqui, nada é exclusivo da UI.
+    // Versioned API: this is the contract the MCP server will consume later —
+    // everything the panel shows comes from here, nothing is UI-only.
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
@@ -54,7 +54,7 @@ async fn system(AxumState(state): AxumState<Shared>) -> impl IntoResponse {
 
 #[derive(Deserialize)]
 struct HistoryQuery {
-    /// janela em minutos (padrão: 24 h)
+    /// window in minutes (default: 24 h)
     minutes: Option<u64>,
 }
 

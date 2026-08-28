@@ -9,8 +9,8 @@ fn now_ts() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// Em container, o hostname/os são os do container; os mounts opcionais
-/// em /host/etc/* (ver compose) devolvem os do host.
+/// Inside a container, hostname/os belong to the container; the optional
+/// /host/etc/* mounts (see compose) surface the host's instead.
 fn host_hostname() -> String {
     if let Ok(h) = std::env::var("WEBO_HOSTNAME") {
         return h;
@@ -32,13 +32,13 @@ fn host_os() -> String {
     System::long_os_version().unwrap_or_default()
 }
 
-/// Caminho do /proc/net/dev. Em container, monte o do host e aponte
-/// WEBO_NET_DEV pra ele; sem isso, as taxas refletem só o container.
+/// Path to /proc/net/dev. Inside a container, mount the host's and point
+/// WEBO_NET_DEV at it; otherwise rates reflect the container only.
 fn net_dev_path() -> String {
     std::env::var("WEBO_NET_DEV").unwrap_or_else(|_| "/proc/net/dev".into())
 }
 
-/// Soma bytes rx/tx de todas as interfaces exceto lo/veth/br-/docker.
+/// Sum rx/tx bytes across all interfaces except lo/veth/br-/docker.
 fn read_net_totals() -> Option<(u64, u64)> {
     let text = fs::read_to_string(net_dev_path()).ok()?;
     let (mut rx, mut tx) = (0u64, 0u64);
@@ -99,16 +99,9 @@ fn count_processes() -> Option<usize> {
     )
 }
 
-async fn count_containers() -> Option<usize> {
-    let docker = bollard::Docker::connect_with_unix_defaults().ok()?;
-    let opts = bollard::container::ListContainersOptions::<String>::default();
-    let list = docker.list_containers(Some(opts)).await.ok()?;
-    Some(list.len())
-}
-
 fn root_disk(disks: &mut Disks) -> (u64, u64) {
     disks.refresh(true);
-    // maior filesystem montado em "/" (em container, o overlay reflete o disco do host)
+    // largest filesystem mounted at "/" (in a container, overlayfs reflects the host disk)
     let mut best = (0u64, 0u64);
     for d in disks.iter() {
         if d.mount_point() == std::path::Path::new("/") && d.total_space() > best.1 {
@@ -134,7 +127,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
     sys.refresh_cpu_usage();
     sys.refresh_memory();
 
-    // info estática
+    // static facts
     {
         let cpu_brand = sys.cpus().first().map(|c| c.brand().trim().to_string()).unwrap_or_default();
         let (_, disk_total) = root_disk(&mut disks);
@@ -192,7 +185,6 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
             battery_pct,
             battery_limit_pct,
             battery_status,
-            containers_running: count_containers().await,
             processes: count_processes(),
             uptime_secs: System::uptime(),
         };

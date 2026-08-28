@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::VecDeque;
 
-/// Uma amostra do histórico (leve: só o que vira sparkline).
+/// One history sample (lightweight: just what becomes a sparkline).
 #[derive(Clone, Copy, Serialize)]
 pub struct Sample {
     pub ts: u64,
@@ -11,7 +11,8 @@ pub struct Sample {
     pub net_tx_bps: u64,
 }
 
-/// O retrato completo do momento — é isso que o painel (e o MCP, depois) leem.
+/// The full picture of the current moment — this is what the panel
+/// (and, later, the MCP server) read.
 #[derive(Clone, Default, Serialize)]
 pub struct Snapshot {
     pub ts: u64,
@@ -31,13 +32,12 @@ pub struct Snapshot {
     pub battery_pct: Option<u8>,
     pub battery_limit_pct: Option<u8>,
     pub battery_status: Option<String>,
-    pub containers_running: Option<usize>,
     pub processes: Option<usize>,
     pub uptime_secs: u64,
 }
 
-/// Informações que não mudam (ou quase) — endpoint separado pro MCP não
-/// precisar do snapshot pra responder "que máquina é essa?".
+/// Facts that rarely change — a separate endpoint so automations can answer
+/// "what machine is this?" without a snapshot.
 #[derive(Clone, Default, Serialize)]
 pub struct SystemInfo {
     pub hostname: String,

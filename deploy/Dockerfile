@@ -1,4 +1,4 @@
-# webo — build em 2 estágios com cargo-chef (deps em layer própria) → runtime magro.
+# webo — 2-stage build with cargo-chef (deps in their own layer) → slim runtime.
 FROM rust:1-slim AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /src
@@ -22,5 +22,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /src/target/release/webo /usr/local/bin/webo
 EXPOSE 5050
 HEALTHCHECK --interval=30s --timeout=3s CMD curl -fs http://localhost:5050/healthz || exit 1
-# root: precisa ler docker.sock e /sys do host; o webo é observador, não expõe shell
+# root: needs to read host /sys; webo is an observer, it exposes no shell
 CMD ["webo"]

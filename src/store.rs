@@ -30,6 +30,7 @@ pub struct Project {
 #[derive(Clone, Debug, Serialize)]
 pub struct Build {
     pub run_id: i64,
+    pub workflow: String,
     pub status: String,
     pub conclusion: Option<String>,
     pub commit_sha: String,
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS builds (
     id INTEGER PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     run_id INTEGER NOT NULL,
+    workflow TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     conclusion TEXT,
     commit_sha TEXT NOT NULL,
@@ -158,14 +160,15 @@ impl Store {
         let tx = conn.transaction()?;
         for b in builds {
             tx.execute(
-                "INSERT INTO builds (project_id, run_id, status, conclusion, commit_sha, commit_msg, branch, duration_secs, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO builds (project_id, run_id, workflow, status, conclusion, commit_sha, commit_msg, branch, duration_secs, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT (project_id, run_id) DO UPDATE SET
+                    workflow = excluded.workflow,
                     status = excluded.status,
                     conclusion = excluded.conclusion,
                     duration_secs = excluded.duration_secs",
                 params![
-                    project_id, b.run_id, b.status, b.conclusion, b.commit_sha,
+                    project_id, b.run_id, b.workflow, b.status, b.conclusion, b.commit_sha,
                     b.commit_msg, b.branch, b.duration_secs, b.created_at
                 ],
             )?;
@@ -176,19 +179,20 @@ impl Store {
     pub fn builds(&self, project_id: i64, limit: usize) -> rusqlite::Result<Vec<Build>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT run_id, status, conclusion, commit_sha, commit_msg, branch, duration_secs, created_at
+            "SELECT run_id, workflow, status, conclusion, commit_sha, commit_msg, branch, duration_secs, created_at
              FROM builds WHERE project_id = ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![project_id, limit as i64], |r| {
             Ok(Build {
                 run_id: r.get(0)?,
-                status: r.get(1)?,
-                conclusion: r.get(2)?,
-                commit_sha: r.get(3)?,
-                commit_msg: r.get(4)?,
-                branch: r.get(5)?,
-                duration_secs: r.get(6)?,
-                created_at: r.get(7)?,
+                workflow: r.get(1)?,
+                status: r.get(2)?,
+                conclusion: r.get(3)?,
+                commit_sha: r.get(4)?,
+                commit_msg: r.get(5)?,
+                branch: r.get(6)?,
+                duration_secs: r.get(7)?,
+                created_at: r.get(8)?,
             })
         })?;
         rows.collect()
@@ -276,6 +280,7 @@ mod tests {
         let id = s.project_by_slug("codo").unwrap().unwrap().id;
         let b = |run_id, status: &str, created| Build {
             run_id,
+            workflow: "Deploy".into(),
             status: status.into(),
             conclusion: None,
             commit_sha: "abc1234".into(),
@@ -319,7 +324,7 @@ mod tests {
         let a = s.project_by_slug("a").unwrap().unwrap().id;
         let b_id = s.project_by_slug("b").unwrap().unwrap().id;
         s.replace_builds(a, &[Build {
-            run_id: 1, status: "completed".into(), conclusion: Some("success".into()),
+            run_id: 1, workflow: "Deploy".into(), status: "completed".into(), conclusion: Some("success".into()),
             commit_sha: "x".into(), commit_msg: "m".into(), branch: "main".into(),
             duration_secs: 1, created_at: 1,
         }]).unwrap();

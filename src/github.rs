@@ -24,6 +24,7 @@ pub fn parse_runs(json: &serde_json::Value) -> Vec<Build> {
                     let updated = r.get("updated_at").and_then(|v| v.as_str()).unwrap_or(started);
                     Some(Build {
                         run_id: r.get("id")?.as_i64()?,
+                        workflow: r.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                         status: r.get("status")?.as_str()?.to_string(),
                         conclusion: r.get("conclusion").and_then(|v| v.as_str()).map(String::from),
                         commit_sha: r
@@ -92,6 +93,11 @@ pub fn parse_versions(json: &serde_json::Value) -> Vec<Version> {
         .unwrap_or_default()
 }
 
+/// Overridable in tests (WEBO_GITHUB_API_BASE) — production talks to github.com.
+fn api_base() -> String {
+    std::env::var("WEBO_GITHUB_API_BASE").unwrap_or_else(|_| "https://api.github.com".into())
+}
+
 fn get(token: &str, url: &str) -> Option<serde_json::Value> {
     ureq::get(url)
         .set("Authorization", &format!("Bearer {token}"))
@@ -110,9 +116,10 @@ fn sync_once(store: &Store, token: &str) {
         let (Some(owner), Some(name)) = (p.repo_owner.as_deref(), p.repo_name.as_deref()) else {
             continue;
         };
+        let base = api_base();
         if let Some(json) = get(
             token,
-            &format!("https://api.github.com/repos/{owner}/{name}/actions/runs?per_page=10"),
+            &format!("{base}/repos/{owner}/{name}/actions/runs?per_page=10"),
         ) {
             let builds = parse_runs(&json);
             if !builds.is_empty() {
@@ -122,12 +129,12 @@ fn sync_once(store: &Store, token: &str) {
         // packages live under /users/... or /orgs/... depending on the owner
         let versions_json = get(
             token,
-            &format!("https://api.github.com/users/{owner}/packages/container/{name}/versions?per_page=20"),
+            &format!("{base}/users/{owner}/packages/container/{name}/versions?per_page=20"),
         )
         .or_else(|| {
             get(
                 token,
-                &format!("https://api.github.com/orgs/{owner}/packages/container/{name}/versions?per_page=20"),
+                &format!("{base}/orgs/{owner}/packages/container/{name}/versions?per_page=20"),
             )
         });
         if let Some(json) = versions_json {
@@ -165,6 +172,7 @@ mod tests {
             "workflow_runs": [
                 {
                     "id": 111,
+                    "name": "Deploy",
                     "status": "completed",
                     "conclusion": "success",
                     "head_sha": "4f44710ffa01f096d4b6bdd9c1b9a38b031f8c6c",
@@ -230,5 +238,50 @@ mod tests {
     fn parse_versions_tolerates_garbage() {
         assert!(parse_versions(&json!({})).is_empty());
         assert!(parse_versions(&json!([{"id": 1}])).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_once_fills_the_store_via_mock_api() {
+        use axum::routing::get as axget;
+        let runs = json!({
+            "workflow_runs": [{
+                "id": 7, "name": "Deploy", "status": "completed", "conclusion": "success",
+                "head_sha": "abc1234def0000000000000000000000000000000",
+                "head_branch": "main", "display_title": "feat: mocked",
+                "run_started_at": "2026-08-28T21:00:00Z", "updated_at": "2026-08-28T21:01:00Z"
+            }]
+        });
+        let versions = json!([{
+            "id": 1, "created_at": "2026-08-28T21:02:00Z",
+            "metadata": { "container": { "tags": ["latest", "abc1234def0000000000000000000000000000dd"] } }
+        }]);
+        let app = axum::Router::new()
+            .route("/repos/{o}/{r}/actions/runs", axget({
+                let runs = runs.clone();
+                move || { let runs = runs.clone(); async move { axum::Json(runs) } }
+            }))
+            .route("/users/{o}/packages/container/{r}/versions", axget({
+                let versions = versions.clone();
+                move || { let versions = versions.clone(); async move { axum::Json(versions) } }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        std::env::set_var("WEBO_GITHUB_API_BASE", format!("http://{addr}"));
+        let store = Store::open_in_memory().unwrap();
+        store.upsert_discovered("webo", "webo", Some(("axolutions", "webo")), None, 1).unwrap();
+        store.upsert_discovered("norepo", "norepo", None, None, 1).unwrap();
+        tokio::task::block_in_place(|| sync_once(&store, "test-token"));
+        std::env::remove_var("WEBO_GITHUB_API_BASE");
+
+        let id = store.project_by_slug("webo").unwrap().unwrap().id;
+        let builds = store.builds(id, 10).unwrap();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].workflow, "Deploy");
+        assert_eq!(builds[0].commit_sha, "abc1234");
+        let versions = store.versions(id, 10).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert!(versions[0].current);
     }
 }

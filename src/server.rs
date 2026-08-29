@@ -183,6 +183,7 @@ mod tests {
                 id,
                 &[crate::store::Build {
                     run_id: 42,
+                    workflow: "Deploy".into(),
                     status: "completed".into(),
                     conclusion: Some("success".into()),
                     commit_sha: "4f44710".into(),

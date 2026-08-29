@@ -98,7 +98,8 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
             continue;
         };
 
-        // image sizes (name -> bytes)
+        // image sizes, keyed by BOTH tag and image id — a container whose tag
+        // moved on (an old `latest`) only references the image by sha256 id
         let image_sizes: HashMap<String, u64> = docker
             .list_images::<String>(None)
             .await
@@ -106,7 +107,7 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 imgs.into_iter()
                     .flat_map(|i| {
                         let size = i.size.max(0) as u64;
-                        i.repo_tags.into_iter().map(move |t| (t, size))
+                        std::iter::once((i.id, size)).chain(i.repo_tags.into_iter().map(move |t| (t, size)))
                     })
                     .collect()
             })
@@ -192,7 +193,13 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
             entry.cpu_pct += cpu_pct;
             entry.mem_bytes += mem_bytes;
             entry.disk_bps += disk_bps;
-            entry.image_bytes += image_sizes.get(&image).copied().unwrap_or(0);
+            entry.image_bytes += c
+                .image_id
+                .as_ref()
+                .and_then(|id| image_sizes.get(id))
+                .or_else(|| image_sizes.get(&image))
+                .copied()
+                .unwrap_or(0);
             entry.volume_bytes += c
                 .mounts
                 .as_ref()
@@ -289,6 +296,46 @@ mod tests {
         let s = started.format(&time::format_description::well_known::Rfc3339).unwrap();
         assert_eq!(uptime_from_rfc3339(&s, now), 3600);
         assert_eq!(uptime_from_rfc3339("not a date", now), 0);
+    }
+
+    /// Runs wherever a docker daemon is reachable (CI runner, dev machines);
+    /// silently skips elsewhere. Exercises the whole discovery loop against
+    /// a real disposable container.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discovery_sees_a_labeled_container() {
+        use std::process::Command;
+        let name = format!("webo-test-{}", std::process::id());
+        let ok = Command::new("docker")
+            .args([
+                "run", "-d", "--rm", "--name", &name,
+                "--label", "com.docker.compose.project=webo-test-proj",
+                "--label", "webo.domain=test.example.com",
+                "alpine:3", "sleep", "60",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("docker unavailable — skipping live discovery test");
+            return;
+        }
+
+        let state = Arc::new(RwLock::new(State::new(10)));
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        let handle = tokio::spawn(run(state.clone(), store.clone(), 1));
+        tokio::time::sleep(Duration::from_millis(4500)).await;
+        handle.abort();
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+
+        let st = state.read().await;
+        let live = st.projects_live.get("webo-test-proj").expect("project discovered");
+        assert_eq!(live.containers.len(), 1);
+        assert_eq!(live.containers[0].name, name);
+        assert!(!live.history.is_empty());
+
+        let p = store.project_by_slug("webo-test-proj").unwrap().expect("persisted");
+        assert_eq!(p.source, "discovered");
+        assert_eq!(p.domain.as_deref(), Some("test.example.com"));
     }
 
     #[test]

@@ -393,7 +393,8 @@
       dh: (d, h) => `${d} d ${h} h`, hm: (h, m) => `${h} h ${m} min`, onlyM: (m) => `${m} min`,
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "web server", mysql: "MySQL", java: "Java",
-        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "" },
+        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "",
+        rust: "Rust", go: "Go", elixir: "Elixir" },
       tabProjects: "Projects",
       registered: "registered", discovered: "discovered",
       onAir: "live", stopped: "stopped",
@@ -437,7 +438,8 @@
       dh: (d, h) => `${d} d ${h} h`, hm: (h, m) => `${h} h ${m} min`, onlyM: (m) => `${m} min`,
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "servidor web", mysql: "MySQL", java: "Java",
-        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "" },
+        ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "",
+        rust: "Rust", go: "Go", elixir: "Elixir" },
       tabProjects: "Projetos",
       registered: "registrado", discovered: "descoberto",
       onAir: "no ar", stopped: "parado",
@@ -651,11 +653,24 @@
     ssh:        { color: "#a2b4d4", icon: '<rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path>' },
     systemd:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
     webo:       { color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
+    rust:       { color: "#f97316", icon: '<circle cx="12" cy="12" r="3.4"></circle><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"></path>' },
+    go:         { color: "#38bdf8", icon: '<circle cx="15" cy="12" r="6"></circle><path d="M2.5 9.5h6M1.5 12.5h5M3 15.5h4"></path>' },
+    elixir:     { color: "#7c5cff", icon: '<path d="M12 2.8c3.6 4 6 7.2 6 11a6 6 0 0 1-12 0c0-3.8 2.4-7 6-11Z"></path>' },
     generic:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
   };
   function hexSoft(hex, a) {
     const n = parseInt(hex.slice(1), 16);
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+  function techAvatar(tech, name, size, iconSize) {
+    const k = tech && KINDS[tech];
+    if (k) {
+      return `<div class="proj-icon" style="width:${size}px;height:${size}px;background:${hexSoft(k.color, 0.14)}" title="${esc(STR[LANG].kinds[tech] ?? tech)}">
+        <svg width="${iconSize}" height="${iconSize}" viewBox="0 0 24 24" fill="none" stroke="${k.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${k.icon}</svg>
+      </div>`;
+    }
+    return `<div class="proj-icon" style="width:${size}px;height:${size}px;font-size:${size < 42 ? 16 : 17}px">${esc((name[0] || "?").toLowerCase())}</div>`;
   }
 
   let procData = { total: null, processes: [] };
@@ -818,7 +833,7 @@
         ? `<span class="mono-badge" style="margin-left:auto">${esc(p.current_version)}</span>` : "";
       return `<div class="proj-card" data-slug="${esc(p.slug)}" role="button" tabindex="0">
         <div style="display:flex;align-items:center;gap:13px">
-          <div class="proj-icon">${esc((p.name[0] || "?").toLowerCase())}</div>
+          ${techAvatar(p.tech, p.name, 40, 20)}
           <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
             <div style="display:flex;align-items:center;gap:8px">
               <span style="font-weight:600;font-size:15px">${esc(p.name)}</span>
@@ -896,7 +911,7 @@
           <button class="back-btn" id="proj-back" aria-label="back">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5 L8 12 L15 19"></path></svg>
           </button>
-          <div class="proj-icon" style="width:42px;height:42px;font-size:17px">${esc((d.name[0] || "?").toLowerCase())}</div>
+          ${techAvatar(d.tech, d.name, 42, 21)}
           <div style="display:flex;flex-direction:column;gap:3px">
             <div style="display:flex;align-items:center;gap:9px">
               <span style="font-size:19px;font-weight:700;letter-spacing:-0.02em">${esc(d.name)}</span>

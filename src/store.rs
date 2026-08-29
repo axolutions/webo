@@ -24,6 +24,7 @@ pub struct Project {
     pub repo_owner: Option<String>,
     pub repo_name: Option<String>,
     pub domain: Option<String>,
+    pub tech: Option<String>,
     pub created_at: i64,
 }
 
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS projects (
     repo_owner TEXT,
     repo_name TEXT,
     domain TEXT,
+    tech TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS builds (
@@ -92,6 +94,7 @@ CREATE INDEX IF NOT EXISTS idx_versions_project ON versions (project_id, created
 /// CREATE TABLE IF NOT EXISTS never alters an existing table.
 fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE builds ADD COLUMN workflow TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN tech TEXT", []);
 }
 
 impl Store {
@@ -139,7 +142,7 @@ impl Store {
     pub fn projects(&self) -> rusqlite::Result<Vec<Project>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, created_at
+            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, tech, created_at
              FROM projects ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -153,10 +156,22 @@ impl Store {
                 repo_owner: r.get(6)?,
                 repo_name: r.get(7)?,
                 domain: r.get(8)?,
-                created_at: r.get(9)?,
+                tech: r.get(9)?,
+                created_at: r.get(10)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Fills the detected technology once; a value already present wins
+    /// (a template choice beats language inference).
+    pub fn set_tech_if_empty(&self, slug: &str, tech: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE projects SET tech = ?1 WHERE slug = ?2 AND tech IS NULL",
+            params![tech, slug],
+        )?;
+        Ok(())
     }
 
     pub fn project_by_slug(&self, slug: &str) -> rusqlite::Result<Option<Project>> {
@@ -338,6 +353,16 @@ mod tests {
         }]).unwrap();
         assert_eq!(s.builds(a, 10).unwrap().len(), 1);
         assert!(s.builds(b_id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_tech_fills_once_and_never_overwrites() {
+        let s = store();
+        s.upsert_discovered("codo", "codo", None, None, 1).unwrap();
+        assert_eq!(s.project_by_slug("codo").unwrap().unwrap().tech, None);
+        s.set_tech_if_empty("codo", "rust").unwrap();
+        s.set_tech_if_empty("codo", "ruby").unwrap();
+        assert_eq!(s.project_by_slug("codo").unwrap().unwrap().tech.as_deref(), Some("rust"));
     }
 
     #[test]

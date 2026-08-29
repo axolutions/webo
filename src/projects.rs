@@ -56,6 +56,18 @@ pub fn uptime_from_rfc3339(started_at: &str, now: u64) -> u64 {
         .unwrap_or(0)
 }
 
+/// Known public images give away the technology even without a repo.
+pub fn tech_from_image(image: &str) -> Option<&'static str> {
+    let name = image.split('/').next_back()?.split(':').next()?;
+    if image.contains("cloudflare/cloudflared") { Some("cloudflare") }
+    else if name.starts_with("postgres") { Some("postgres") }
+    else if name.starts_with("redis") { Some("redis") }
+    else if name.starts_with("mysql") || name.starts_with("mariadb") { Some("mysql") }
+    else if name.starts_with("nginx") || name.starts_with("caddy") || name.starts_with("traefik") { Some("web") }
+    else if name.starts_with("node") { Some("node") }
+    else { None }
+}
+
 fn now_ts() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
@@ -129,7 +141,7 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
         }
 
         let mut groups: HashMap<String, ProjectLive> = HashMap::new();
-        let mut group_meta: HashMap<String, (String, Option<(String, String)>, Option<String>)> = HashMap::new();
+        let mut group_meta: HashMap<String, (String, Option<(String, String)>, Option<String>, Option<&'static str>)> = HashMap::new();
         let mut seen_ids: Vec<String> = Vec::new();
 
         for c in &containers {
@@ -220,18 +232,21 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 disk_bps,
             });
 
-            let meta = group_meta.entry(slug).or_insert((compose.clone(), None, None));
+            let meta = group_meta.entry(slug).or_insert((compose.clone(), None, None, None));
             if meta.1.is_none() {
                 meta.1 = infer_repo(&image);
             }
             if meta.2.is_none() {
                 meta.2 = labels.get(DOMAIN_LABEL).cloned();
             }
+            if meta.3.is_none() {
+                meta.3 = tech_from_image(&image);
+            }
         }
         prev.retain(|k, _| seen_ids.contains(k));
 
         // persist discoveries (never clobbering user-made links)
-        for (slug, (compose, repo, domain)) in &group_meta {
+        for (slug, (compose, repo, domain, tech)) in &group_meta {
             let _ = store.upsert_discovered(
                 slug,
                 compose,
@@ -239,6 +254,9 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 domain.as_deref(),
                 now as i64,
             );
+            if let Some(t) = tech {
+                let _ = store.set_tech_if_empty(slug, t);
+            }
         }
 
         // merge into shared state, carrying history forward
@@ -279,6 +297,15 @@ mod tests {
         assert_eq!(slug_for("Codo"), "codo");
         assert_eq!(slug_for("my app!"), "my-app-");
         assert_eq!(slug_for("deploy_webo"), "deploy_webo");
+    }
+
+    #[test]
+    fn tech_from_image_knows_public_images() {
+        assert_eq!(tech_from_image("cloudflare/cloudflared:latest"), Some("cloudflare"));
+        assert_eq!(tech_from_image("postgres:16"), Some("postgres"));
+        assert_eq!(tech_from_image("docker.io/library/redis:7-alpine"), Some("redis"));
+        assert_eq!(tech_from_image("nginx:alpine"), Some("web"));
+        assert_eq!(tech_from_image("ghcr.io/axolutions/webo:latest"), None);
     }
 
     #[test]

@@ -93,6 +93,30 @@ pub fn parse_versions(json: &serde_json::Value) -> Vec<Version> {
         .unwrap_or_default()
 }
 
+/// Repo languages payload → webo tech kind: the highest-byte language that
+/// maps to something the panel can draw (markup like HTML/CSS is skipped).
+pub fn tech_from_languages(json: &serde_json::Value) -> Option<String> {
+    let obj = json.as_object()?;
+    let mut langs: Vec<(&String, i64)> =
+        obj.iter().filter_map(|(k, v)| v.as_i64().map(|n| (k, n))).collect();
+    langs.sort_by(|a, b| b.1.cmp(&a.1));
+    langs.into_iter().find_map(|(name, _)| {
+        Some(match name.as_str() {
+            "Rust" => "rust",
+            "Ruby" => "ruby",
+            "JavaScript" | "TypeScript" => "node",
+            "Python" => "python",
+            "Go" => "go",
+            "Java" | "Kotlin" => "java",
+            "Elixir" => "elixir",
+            "PHP" => "web",
+            "C" | "C++" => "generic",
+            _ => return None,
+        }
+        .to_string())
+    })
+}
+
 /// Overridable in tests (WEBO_GITHUB_API_BASE) — production talks to github.com.
 fn api_base() -> String {
     std::env::var("WEBO_GITHUB_API_BASE").unwrap_or_else(|_| "https://api.github.com".into())
@@ -117,6 +141,14 @@ fn sync_once(store: &Store, token: &str) {
             continue;
         };
         let base = api_base();
+        if p.tech.is_none() {
+            if let Some(t) = get(token, &format!("{base}/repos/{owner}/{name}/languages"))
+                .as_ref()
+                .and_then(tech_from_languages)
+            {
+                let _ = store.set_tech_if_empty(&p.slug, &t);
+            }
+        }
         if let Some(json) = get(
             token,
             &format!("{base}/repos/{owner}/{name}/actions/runs?per_page=10"),
@@ -240,6 +272,15 @@ mod tests {
         assert!(parse_versions(&json!([{"id": 1}])).is_empty());
     }
 
+    #[test]
+    fn tech_from_languages_maps_and_skips_markup() {
+        assert_eq!(tech_from_languages(&json!({"Rust": 90000, "Shell": 100})).as_deref(), Some("rust"));
+        assert_eq!(tech_from_languages(&json!({"HTML": 90000, "Ruby": 100})).as_deref(), Some("ruby"));
+        assert_eq!(tech_from_languages(&json!({"TypeScript": 5})).as_deref(), Some("node"));
+        assert_eq!(tech_from_languages(&json!({"Brainfuck": 5})), None);
+        assert_eq!(tech_from_languages(&json!([])), None);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_once_fills_the_store_via_mock_api() {
         use axum::routing::get as axget;
@@ -256,6 +297,7 @@ mod tests {
             "metadata": { "container": { "tags": ["latest", "abc1234def0000000000000000000000000000dd"] } }
         }]);
         let app = axum::Router::new()
+            .route("/repos/{o}/{r}/languages", axget(|| async { axum::Json(json!({"Rust": 12345})) }))
             .route("/repos/{o}/{r}/actions/runs", axget({
                 let runs = runs.clone();
                 move || { let runs = runs.clone(); async move { axum::Json(runs) } }
@@ -283,5 +325,6 @@ mod tests {
         let versions = store.versions(id, 10).unwrap();
         assert_eq!(versions.len(), 1);
         assert!(versions[0].current);
+        assert_eq!(store.project_by_slug("webo").unwrap().unwrap().tech.as_deref(), Some("rust"));
     }
 }

@@ -92,6 +92,7 @@ async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
                 "repo": p.repo_owner.as_ref().zip(p.repo_name.as_ref())
                     .map(|(o, n)| format!("{o}/{n}")),
                 "domain": p.domain,
+                "tech": p.tech,
                 "running": live.is_some(),
                 "containers": live.map(|l| l.containers.len()).unwrap_or(0),
                 "cpu_pct": live.map(|l| l.cpu_pct).unwrap_or(0.0),
@@ -124,6 +125,7 @@ async fn project_detail(
         "repo_owner": p.repo_owner,
         "repo_name": p.repo_name,
         "domain": p.domain,
+        "tech": p.tech,
         "running": !live.containers.is_empty(),
         "cpu_pct": live.cpu_pct,
         "mem_bytes": live.mem_bytes,
@@ -177,6 +179,7 @@ mod tests {
             .upsert_discovered("codo", "codo", Some(("murichristopher", "codo")), Some("codo.example.com"), 100)
             .unwrap();
         store.upsert_discovered("cloudflared", "cloudflared", None, None, 100).unwrap();
+        store.set_tech_if_empty("codo", "rust").unwrap();
         let id = store.project_by_slug("codo").unwrap().unwrap().id;
         store
             .replace_builds(
@@ -314,6 +317,7 @@ mod tests {
         assert_eq!(list.len(), 2);
         let codo = list.iter().find(|p| p["slug"] == "codo").unwrap();
         assert_eq!(codo["repo"], "murichristopher/codo");
+        assert_eq!(codo["tech"], "rust");
         assert_eq!(codo["running"], true);
         assert_eq!(codo["containers"], 1);
         assert_eq!(codo["size_bytes"], 98_700_000);
@@ -330,6 +334,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["name"], "codo");
         assert_eq!(json["domain"], "codo.example.com");
+        assert_eq!(json["tech"], "rust");
         assert_eq!(json["containers"][0]["name"], "codo");
         assert_eq!(json["history"].as_array().unwrap().len(), 1);
         assert_eq!(json["builds"][0]["commit_sha"], "4f44710");

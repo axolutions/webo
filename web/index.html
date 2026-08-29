@@ -241,6 +241,9 @@
   .btn-primary:disabled { opacity: 0.4; box-shadow: none; cursor: default; }
   .btn-ghost { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid var(--stroke); border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
   .file-add { font-family: var(--mono); font-size: 10.5px; color: var(--ok); padding: 1px 7px; border-radius: 6px; background: var(--ok-soft); white-space: nowrap; }
+  #wiz-repo-rows { max-height: 48vh; overflow-y: auto; overscroll-behavior: contain; }
+  .wiz-footer { position: sticky; bottom: 16px; display: flex; justify-content: flex-end; z-index: 5; }
+  .wiz-footer .btn-primary { box-shadow: 0 10px 26px -8px rgba(0, 0, 0, 0.65), 0 10px 22px -12px var(--accent); }
   .warn-strip { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 12px; border: 1px solid rgba(234, 179, 8, 0.35); background: rgba(234, 179, 8, 0.09); font-size: 12.5px; color: var(--text-2); }
   .prog-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 999px; flex: none; }
   .spin { border: 2.5px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 999px; width: 16px; height: 16px; animation: wspin 0.9s linear infinite; }
@@ -424,7 +427,7 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "web server", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "",
-        rust: "Rust", go: "Go", elixir: "Elixir" },
+        rust: "Rust", go: "Go", elixir: "Elixir", next: "Next.js" },
       tabProjects: "Projects",
       registered: "registered", discovered: "discovered",
       onAir: "live", stopped: "stopped",
@@ -497,7 +500,7 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "servidor web", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "",
-        rust: "Rust", go: "Go", elixir: "Elixir" },
+        rust: "Rust", go: "Go", elixir: "Elixir", next: "Next.js" },
       tabProjects: "Projetos",
       registered: "registrado", discovered: "descoberto",
       onAir: "no ar", stopped: "parado",
@@ -740,6 +743,7 @@
     systemd:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
     webo:       { color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
     rust:       { color: "#f97316", icon: '<circle cx="12" cy="12" r="3.4"></circle><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"></path>' },
+    next:       { color: "#cbd5e8", icon: '<circle cx="12" cy="12" r="9"></circle><path d="M9 16 L9 8.5 L16.5 18"></path><path d="M15.2 8.5 L15.2 13.5"></path>' },
     go:         { color: "#38bdf8", icon: '<circle cx="15" cy="12" r="6"></circle><path d="M2.5 9.5h6M1.5 12.5h5M3 15.5h4"></path>' },
     elixir:     { color: "#7c5cff", icon: '<path d="M12 2.8c3.6 4 6 7.2 6 11a6 6 0 0 1-12 0c0-3.8 2.4-7 6-11Z"></path>' },
     generic:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
@@ -1180,7 +1184,7 @@
           <div class="dcard-title"><span class="label">${t("wizRepos")}</span><span class="sub">${t("wizViaToken")}</span></div>
           <div id="wiz-repo-rows">${rows}</div>
         </div>
-        <div style="display:flex;justify-content:flex-end">
+        <div class="wiz-footer">
           <button class="btn-primary" id="wiz-continue" ${wiz.sel ? "" : "disabled"}>
             ${selName ? t("wizContinue", esc(selName)) : t("wizPick")}
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5 L16 12 L9 19"></path></svg>
@@ -1223,7 +1227,7 @@
     const p = wiz.plan;
     if (!p.supported) { renderWizBlocked(); return; }
     const repoFull = wiz.sel;
-    const kind = p.template === "rails" ? KINDS.ruby : KINDS.node;
+    const kind = p.template === "rails" ? KINDS.ruby : KINDS.next;
     const evidence = p.template === "rails" ? t("wizGemfile", "rails") : t("wizPackage");
     const dockerNote = p.has_dockerfile ? t("wizHasDocker") : t("wizNoDocker");
     const files = (p.files || []).map((f) => `
@@ -1346,7 +1350,7 @@
   function renderWizStep3(detail) {
     if (!wiz || wiz.step !== 3 || $("view-wizard").hidden) return;
     const prov = wiz.provision;
-    const kind = wiz.plan.template === "rails" ? KINDS.ruby : KINDS.node;
+    const kind = wiz.plan.template === "rails" ? KINDS.ruby : KINDS.next;
     const build = detail && detail.builds && detail.builds[0];
     const buildState = !build ? "run" : build.status !== "completed" ? "run" : build.conclusion === "success" ? "done" : "fail";
     const buildSub = build

@@ -62,7 +62,7 @@ pub fn plan(
     };
     let tech = match template {
         Template::Rails => "ruby",
-        Template::Next => "node",
+        Template::Next => "next",
     };
     let render = |text: &str| {
         text.replace("{{slug}}", slug)

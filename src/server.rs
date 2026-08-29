@@ -257,7 +257,7 @@ async fn project_create(
     };
     let tech = match template {
         scaffold::Template::Rails => "ruby",
-        scaffold::Template::Next => "node",
+        scaffold::Template::Next => "next",
     };
     let slug = projects::slug_for(&name);
     let now = std::time::SystemTime::now()

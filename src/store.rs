@@ -25,6 +25,9 @@ pub struct Project {
     pub repo_name: Option<String>,
     pub domain: Option<String>,
     pub tech: Option<String>,
+    /// Wizard lifecycle: NULL for plain projects; 'provisioning' | 'deploying'
+    /// while the first deploy is in flight.
+    pub status: Option<String>,
     pub created_at: i64,
 }
 
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS projects (
     repo_name TEXT,
     domain TEXT,
     tech TEXT,
+    status TEXT,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS builds (
@@ -95,6 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_versions_project ON versions (project_id, created
 fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE builds ADD COLUMN workflow TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN tech TEXT", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN status TEXT", []);
 }
 
 impl Store {
@@ -142,7 +147,7 @@ impl Store {
     pub fn projects(&self) -> rusqlite::Result<Vec<Project>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, tech, created_at
+            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, tech, status, created_at
              FROM projects ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -157,10 +162,42 @@ impl Store {
                 repo_name: r.get(7)?,
                 domain: r.get(8)?,
                 tech: r.get(9)?,
-                created_at: r.get(10)?,
+                status: r.get(10)?,
+                created_at: r.get(11)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Wizard entry point: an explicit registration. Unlike discovery, the
+    /// repo link is authoritative here (and upgrades a discovered project).
+    pub fn register(
+        &self,
+        slug: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        tech: &str,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO projects (slug, name, source, repo_owner, repo_name, tech, status, created_at)
+             VALUES (?1, ?1, 'registered', ?2, ?3, ?4, 'provisioning', ?5)
+             ON CONFLICT (slug) DO UPDATE SET
+                source = 'registered',
+                repo_owner = excluded.repo_owner,
+                repo_name = excluded.repo_name,
+                tech = excluded.tech,
+                status = COALESCE(projects.status, 'provisioning')",
+            params![slug, repo_owner, repo_name, tech, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_status(&self, slug: &str, status: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE projects SET status = ?1 WHERE slug = ?2", params![status, slug])?;
+        Ok(())
     }
 
     /// Fills the detected technology once; a value already present wins
@@ -353,6 +390,29 @@ mod tests {
         }]).unwrap();
         assert_eq!(s.builds(a, 10).unwrap().len(), 1);
         assert!(s.builds(b_id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn register_upgrades_discovered_and_status_lifecycle() {
+        let s = store();
+        s.upsert_discovered("axofin", "axofin", None, None, 1).unwrap();
+        s.register("axofin", "murichristopher", "axofin", "ruby", 2).unwrap();
+        let p = s.project_by_slug("axofin").unwrap().unwrap();
+        assert_eq!(p.source, "registered");
+        assert_eq!(p.repo_owner.as_deref(), Some("murichristopher"));
+        assert_eq!(p.tech.as_deref(), Some("ruby"));
+        assert_eq!(p.status.as_deref(), Some("provisioning"));
+
+        s.set_status("axofin", Some("deploying")).unwrap();
+        assert_eq!(s.project_by_slug("axofin").unwrap().unwrap().status.as_deref(), Some("deploying"));
+        s.set_status("axofin", None).unwrap();
+        assert_eq!(s.project_by_slug("axofin").unwrap().unwrap().status, None);
+
+        // discovery afterwards must not clobber the registration
+        s.upsert_discovered("axofin", "axofin", Some(("other", "repo")), None, 3).unwrap();
+        let p = s.project_by_slug("axofin").unwrap().unwrap();
+        assert_eq!(p.source, "registered");
+        assert_eq!(p.repo_owner.as_deref(), Some("murichristopher"));
     }
 
     #[test]

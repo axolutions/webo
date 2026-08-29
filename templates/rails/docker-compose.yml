@@ -1,0 +1,15 @@
+# {{slug}} — scaffolded by webo. Run: docker compose -f deploy/docker-compose.yml up -d --build
+name: {{slug}}
+services:
+  {{slug}}:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - RAILS_ENV=production
+    volumes:
+      - {{slug}}-storage:/app/storage
+
+volumes:
+  {{slug}}-storage:

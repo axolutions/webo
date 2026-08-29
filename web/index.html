@@ -221,8 +221,33 @@
   .mini-dot2 { width: 7px; height: 7px; border-radius: 999px; flex: none; }
   .repo-chip { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 13px; border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); }
   .empty-note { padding: 22px 20px; font-size: 13px; color: var(--text-3); text-align: center; }
-  @media (max-width: 900px) { .proj-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-cols { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 900px) { .proj-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .detail-cols { grid-template-columns: minmax(0, 1fr); } .wiz-cols { grid-template-columns: minmax(0, 1fr) !important; } }
   @media (max-width: 620px) { .proj-grid { grid-template-columns: minmax(0, 1fr); } .detail-tiles { grid-template-columns: minmax(0, 1fr); } }
+  #view-wizard { margin-top: 18px; }
+  .step-chip { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600; border: 1px solid var(--stroke); background: var(--surface); color: var(--text-3); white-space: nowrap; }
+  .step-chip.on { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+  .step-chip.done { color: var(--ok); border-color: transparent; background: var(--ok-soft); }
+  .step-num { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 999px; background: var(--surface-3); font-size: 11px; font-weight: 700; }
+  .step-chip.on .step-num { background: var(--accent); color: #fff; }
+  .wrow { display: flex; align-items: center; gap: 13px; padding: 13px 20px; border-top: 1px solid var(--stroke); }
+  .wrow:first-of-type { border-top: 0; }
+  .wrow.pick { cursor: pointer; }
+  .wrow.pick:hover { background: var(--surface); }
+  .wrow.sel { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .wrow.dim { opacity: 0.45; cursor: default; }
+  .lang-dot { width: 9px; height: 9px; border-radius: 999px; flex: none; background: var(--text-3); }
+  .pill { font-size: 10.5px; font-weight: 600; color: var(--text-2); padding: 1px 7px; border-radius: 999px; background: var(--surface-3); white-space: nowrap; }
+  .btn-primary { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 0; border-radius: 12px; background: linear-gradient(150deg, var(--accent), var(--accent-2)); color: #fff; font-weight: 600; font-size: 13.5px; white-space: nowrap; font-family: inherit; cursor: pointer; box-shadow: 0 10px 22px -12px var(--accent); }
+  .btn-primary:disabled { opacity: 0.4; box-shadow: none; cursor: default; }
+  .btn-ghost { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid var(--stroke); border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
+  .file-add { font-family: var(--mono); font-size: 10.5px; color: var(--ok); padding: 1px 7px; border-radius: 6px; background: var(--ok-soft); white-space: nowrap; }
+  #wiz-repo-rows { max-height: 48vh; overflow-y: auto; overscroll-behavior: contain; }
+  .wiz-footer { position: sticky; bottom: 16px; display: flex; justify-content: flex-end; z-index: 5; }
+  .wiz-footer .btn-primary { box-shadow: 0 10px 26px -8px rgba(0, 0, 0, 0.65), 0 10px 22px -12px var(--accent); }
+  .warn-strip { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 12px; border: 1px solid rgba(234, 179, 8, 0.35); background: rgba(234, 179, 8, 0.09); font-size: 12.5px; color: var(--text-2); }
+  .prog-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 999px; flex: none; }
+  .spin { border: 2.5px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 999px; width: 16px; height: 16px; animation: wspin 0.9s linear infinite; }
+  @keyframes wspin { to { transform: rotate(360deg); } }
   footer { margin-top: 26px; text-align: center; font-size: 12px; color: var(--text-3); }
 </style>
 </head>
@@ -355,11 +380,19 @@
   </section>
 
   <section id="view-projects" hidden>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:16px">
+      <button class="btn-primary" id="wiz-open">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+        <span data-i18n="wizNew">new project</span>
+      </button>
+    </div>
     <div class="proj-grid" id="proj-cards"></div>
     <div class="empty-note" id="proj-empty" hidden></div>
   </section>
 
   <section id="view-project-detail" hidden></section>
+
+  <section id="view-wizard" hidden></section>
 
   <footer data-i18n="footer">webo · self-hosted health panel</footer>
 </div>
@@ -394,7 +427,7 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "web server", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "this panel", generic: "",
-        rust: "Rust", go: "Go", elixir: "Elixir" },
+        rust: "Rust", go: "Go", elixir: "Elixir", next: "Next.js" },
       tabProjects: "Projects",
       registered: "registered", discovered: "discovered",
       onAir: "live", stopped: "stopped",
@@ -411,6 +444,34 @@
       imgPlusVol: "image + volumes on the server",
       noBuilds: "no builds yet — connect a repo and set WEBO_GITHUB_TOKEN",
       noVersions: "no versions yet",
+      wizNew: "new project", wizTitle: "new project", wizCrumb: "Projects /",
+      wizStep1: "Repository", wizStep2: "Validation", wizStep3: "Deploy",
+      wizSearchPh: "search your repositories…",
+      wizRepos: "Repositories", wizViaToken: "via GitHub token",
+      wizAlready: "already a project", wizPrivate: "private",
+      wizContinue: (r) => `continue with ${r}`, wizPick: "pick a repository",
+      wizDetected: (t) => `${t} detected`,
+      wizGemfile: (v) => `Gemfile with ${v}`, wizPackage: "package.json with next",
+      wizNoDocker: "no Dockerfile — webo's full template will be used",
+      wizHasDocker: "existing Dockerfile respected — webo adds only workflow + compose",
+      wizNoDb: "no managed database — connecting one comes later, on this screen",
+      wizWarn: (r) => `Files will be committed straight to the default branch of ${r}. Clicking create is the confirmation.`,
+      wizCreate: "create project and start deploy",
+      wizPlan: (n) => `The plan · ${n} files in the repo`, wizPlanVia: (t) => `${t} template · light`,
+      wizSecrets: (n) => `Deploy secrets · ${n}`, wizSecretsNote: "values never stay in webo",
+      wizSecretOk: "created by webo", wizSecretSkip: "not configured on the server",
+      wizBlockedTitle: (l) => `webo doesn't work with ${l} yet`,
+      wizBlockedBody: (l) => `${l} projects can't be created here for now — they'll be deployable through the MCP soon.`,
+      wizBack: "← choose another repository",
+      wizFirstDeploy: "first deploy", wizLive: "First deploy · live", wizEvery: "updates every 5 s",
+      wizStepCommit: "Template committed", wizStepSecrets: "Secrets created in the repository",
+      wizStepBuild: "Build on GitHub Actions", wizStepServer: "Deploy on the server",
+      wizStepUp: "Container live", wizStepUpSub: "the project card appears in the Projects tab",
+      wizMeanwhile: "Meanwhile", wizCanClose: "You can leave this screen — the deploy continues on GitHub and progress lives on the project card.",
+      wizSeeRun: "follow the run on GitHub", wizSeeProject: "open the project",
+      wizFailed: "the first deploy failed — check the run on GitHub",
+      wizError: (m) => `something went wrong: ${m}`,
+      filesN: (n) => `${n} files`,
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -439,7 +500,7 @@
       kinds: { node: "Node.js", postgres: "PostgreSQL", docker: "Docker", cloudflare: "Cloudflare Tunnel",
         redis: "Redis", python: "Python", web: "servidor web", mysql: "MySQL", java: "Java",
         ruby: "Ruby", shell: "shell", ssh: "SSH", systemd: "systemd", webo: "este painel", generic: "",
-        rust: "Rust", go: "Go", elixir: "Elixir" },
+        rust: "Rust", go: "Go", elixir: "Elixir", next: "Next.js" },
       tabProjects: "Projetos",
       registered: "registrado", discovered: "descoberto",
       onAir: "no ar", stopped: "parado",
@@ -456,6 +517,34 @@
       imgPlusVol: "imagem + volumes no servidor",
       noBuilds: "sem builds ainda — conecte um repo e configure WEBO_GITHUB_TOKEN",
       noVersions: "sem versões ainda",
+      wizNew: "novo projeto", wizTitle: "novo projeto", wizCrumb: "Projetos /",
+      wizStep1: "Repositório", wizStep2: "Validação", wizStep3: "Deploy",
+      wizSearchPh: "buscar nos seus repositórios…",
+      wizRepos: "Repositórios", wizViaToken: "via token do GitHub",
+      wizAlready: "já é projeto", wizPrivate: "privado",
+      wizContinue: (r) => `continuar com ${r}`, wizPick: "escolha um repositório",
+      wizDetected: (t) => `${t} detectado`,
+      wizGemfile: (v) => `Gemfile com ${v}`, wizPackage: "package.json com next",
+      wizNoDocker: "sem Dockerfile próprio — o template completo do webo será usado",
+      wizHasDocker: "Dockerfile próprio respeitado — o webo adiciona só workflow + compose",
+      wizNoDb: "sem banco gerenciado — conectar banco vem depois, nesta tela",
+      wizWarn: (r) => `Os arquivos serão commitados direto na branch padrão de ${r}. O clique em criar é a confirmação.`,
+      wizCreate: "criar projeto e iniciar deploy",
+      wizPlan: (n) => `O plano · ${n} arquivos no repo`, wizPlanVia: (t) => `template ${t} · leve`,
+      wizSecrets: (n) => `Secrets do deploy · ${n}`, wizSecretsNote: "valores nunca ficam no webo",
+      wizSecretOk: "criado pelo webo", wizSecretSkip: "não configurado no servidor",
+      wizBlockedTitle: (l) => `O webo ainda não trabalha com ${l}`,
+      wizBlockedBody: (l) => `Projetos ${l} ainda não podem ser criados por aqui — em breve vão poder ser deployados pelo MCP.`,
+      wizBack: "← escolher outro repositório",
+      wizFirstDeploy: "primeiro deploy", wizLive: "Primeiro deploy · ao vivo", wizEvery: "atualiza a cada 5 s",
+      wizStepCommit: "Template commitado", wizStepSecrets: "Secrets criados no repositório",
+      wizStepBuild: "Build no GitHub Actions", wizStepServer: "Deploy no servidor",
+      wizStepUp: "Container no ar", wizStepUpSub: "o card do projeto aparece na aba Projetos",
+      wizMeanwhile: "Enquanto isso", wizCanClose: "Pode sair desta tela — o deploy continua no GitHub e o progresso fica no card do projeto.",
+      wizSeeRun: "acompanhar o run no GitHub", wizSeeProject: "abrir o projeto",
+      wizFailed: "o primeiro deploy falhou — veja o run no GitHub",
+      wizError: (m) => `algo deu errado: ${m}`,
+      filesN: (n) => `${n} arquivos`,
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -654,6 +743,7 @@
     systemd:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3"></circle><path d="M12 2v4M12 18v4M2 12h4M18 12h4"></path>' },
     webo:       { color: "#7c5cff", icon: '<rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect>' },
     rust:       { color: "#f97316", icon: '<circle cx="12" cy="12" r="3.4"></circle><path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"></path>' },
+    next:       { color: "#cbd5e8", icon: '<circle cx="12" cy="12" r="9"></circle><path d="M9 16 L9 8.5 L16.5 18"></path><path d="M15.2 8.5 L15.2 13.5"></path>' },
     go:         { color: "#38bdf8", icon: '<circle cx="15" cy="12" r="6"></circle><path d="M2.5 9.5h6M1.5 12.5h5M3 15.5h4"></path>' },
     elixir:     { color: "#7c5cff", icon: '<path d="M12 2.8c3.6 4 6 7.2 6 11a6 6 0 0 1-12 0c0-3.8 2.4-7 6-11Z"></path>' },
     generic:    { color: "#a2b4d4", icon: '<circle cx="12" cy="12" r="3.2"></circle><path d="M12 3.5v2.4M12 18.1v2.4M3.5 12h2.4M18.1 12h2.4M6 6l1.7 1.7M16.3 16.3L18 18M18 6l-1.7 1.7M7.7 16.3L6 18"></path>' },
@@ -1018,17 +1108,344 @@
     if (card) { ev.preventDefault(); openProject(card.dataset.slug); }
   });
 
+  // ---------- new-project wizard ----------
+  const LANG_COLORS = { Ruby: "#e5484d", Rust: "#f97316", TypeScript: "#38bdf8", JavaScript: "#eab308", Python: "#38bdf8", Go: "#38bdf8", Shell: "#a2b4d4", Elixir: "#7c5cff", HTML: "#f97316", CSS: "#7c5cff" };
+  let wiz = null;
+  let wizPoll = null;
+
+  function stopWizPoll() {
+    if (wizPoll) { clearInterval(wizPoll); wizPoll = null; }
+  }
+  function closeWizard(toDetail) {
+    stopWizPoll();
+    const slug = wiz && wiz.slug;
+    wiz = null;
+    $("view-wizard").hidden = true;
+    if (toDetail && slug) { openProject(slug); }
+    else { $("view-projects").hidden = false; tickProjects(); }
+  }
+
+  function wizHeader() {
+    const chips = [1, 2, 3].map((n) => {
+      const labels = [t("wizStep1"), t("wizStep2"), t("wizStep3")];
+      const cls = n < wiz.step ? "done" : n === wiz.step ? "on" : "";
+      const inner = n < wiz.step
+        ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5 L9.5 17.5 L19.5 6.5"></path></svg>`
+        : `<span class="step-num">${n}</span>`;
+      return `<div class="step-chip ${cls}">${inner}${labels[n - 1]}</div>` +
+        (n < 3 ? `<span style="color:var(--text-3);font-size:12px">→</span>` : "");
+    }).join("");
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="back-btn" id="wiz-back" aria-label="back">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5 L8 12 L15 19"></path></svg>
+        </button>
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span style="font-size:12px;color:var(--text-3)">${t("wizCrumb")}</span>
+          <span style="font-size:19px;font-weight:700;letter-spacing:-0.02em">${t("wizTitle")}</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">${chips}</div>
+    </div>`;
+  }
+
+  function renderWizStep1() {
+    const q = (wiz.q || "").toLowerCase();
+    const repos = (wiz.repos || []).filter((r) => `${r.owner}/${r.name}`.toLowerCase().includes(q));
+    const rows = wiz.repos === null
+      ? `<div class="empty-note">…</div>`
+      : repos.map((r) => {
+          const key = `${r.owner}/${r.name}`;
+          const sel = wiz.sel === key;
+          const cls = "wrow " + (r.already_project ? "dim" : "pick") + (sel ? " sel" : "");
+          const right = r.already_project
+            ? `<span class="pill">${t("wizAlready")}</span>`
+            : `<span style="font-size:12px;color:var(--text-3)">${t("agoW", relTime(nowSecs() - r.pushed_at))}</span>`;
+          return `<div class="${cls}" data-repo="${esc(key)}" ${r.already_project ? "" : 'role="button" tabindex="0"'}>
+            <span class="lang-dot" style="background:${LANG_COLORS[r.language] || "var(--text-3)"}"></span>
+            <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <span style="font-family:var(--mono);font-size:13px"><span style="color:var(--text-3)">${esc(r.owner)}/</span><span style="font-weight:600">${esc(r.name)}</span></span>
+                ${r.private ? `<span class="pill">${t("wizPrivate")}</span>` : ""}
+              </div>
+              <span style="font-size:11.5px;color:var(--text-3)">${esc(r.language || "—")}</span>
+            </div>
+            ${right}
+          </div>`;
+        }).join("") || `<div class="empty-note">—</div>`;
+    const selName = wiz.sel ? wiz.sel.split("/")[1] : null;
+    $("view-wizard").innerHTML = wizHeader() + `
+      <div style="display:flex;flex-direction:column;gap:16px;max-width:840px;margin:0 auto">
+        <div class="search-box" style="width:100%">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20 L16.5 16.5"></path></svg>
+          <input id="wiz-search" type="search" autocomplete="off" placeholder="${t("wizSearchPh")}" value="${esc(wiz.q || "")}">
+        </div>
+        <div class="dcard">
+          <div class="dcard-title"><span class="label">${t("wizRepos")}</span><span class="sub">${t("wizViaToken")}</span></div>
+          <div id="wiz-repo-rows">${rows}</div>
+        </div>
+        <div class="wiz-footer">
+          <button class="btn-primary" id="wiz-continue" ${wiz.sel ? "" : "disabled"}>
+            ${selName ? t("wizContinue", esc(selName)) : t("wizPick")}
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5 L16 12 L9 19"></path></svg>
+          </button>
+        </div>
+        ${wiz.error ? `<div class="warn-strip">${esc(wiz.error)}</div>` : ""}
+      </div>`;
+    wireWizCommon();
+    const search = $("wiz-search");
+    search.addEventListener("input", () => { wiz.q = search.value; renderWizStep1(); $("wiz-search").focus(); const v = $("wiz-search").value; $("wiz-search").setSelectionRange(v.length, v.length); });
+    $("wiz-repo-rows").addEventListener("click", (ev) => {
+      const row = ev.target.closest(".wrow.pick");
+      if (!row) return;
+      wiz.sel = row.dataset.repo;
+      renderWizStep1();
+    });
+    $("wiz-continue").addEventListener("click", async () => {
+      if (!wiz.sel) return;
+      const [owner, name] = wiz.sel.split("/");
+      $("wiz-continue").disabled = true;
+      try {
+        const res = await fetch("/api/v1/projects", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ repo_owner: owner, repo_name: name }),
+        });
+        const data = await res.json();
+        if (!res.ok) { wiz.error = t("wizError", data.error || res.status); renderWizStep1(); return; }
+        wiz.step = 2; wiz.plan = data; wiz.error = null;
+        renderWizStep2();
+      } catch { wiz.error = t("wizError", "network"); renderWizStep1(); }
+    });
+  }
+
+  function techLabel() {
+    return wiz.plan.template === "rails" ? "Rails" : "Next";
+  }
+
+  function renderWizStep2() {
+    const p = wiz.plan;
+    if (!p.supported) { renderWizBlocked(); return; }
+    const repoFull = wiz.sel;
+    const kind = p.template === "rails" ? KINDS.ruby : KINDS.next;
+    const evidence = p.template === "rails" ? t("wizGemfile", "rails") : t("wizPackage");
+    const dockerNote = p.has_dockerfile ? t("wizHasDocker") : t("wizNoDocker");
+    const files = (p.files || []).map((f) => `
+      <div class="wrow" style="padding:11px 20px">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3 L6 3 A1.5 1.5 0 0 0 4.5 4.5 L4.5 19.5 A1.5 1.5 0 0 0 6 21 L18 21 A1.5 1.5 0 0 0 19.5 19.5 L19.5 9.5 Z"></path><path d="M13 3 L13 9.5 L19.5 9.5"></path></svg>
+        <span style="font-family:var(--mono);font-size:12.5px;flex:1">${esc(f)}</span>
+        <span class="file-add">+</span>
+      </div>`).join("");
+    const secrets = (p.secrets || []).map((sec) => `
+      <div class="wrow" style="padding:11px 20px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg>
+        <span style="font-family:var(--mono);font-size:12.5px;flex:1">${esc(sec.name)}</span>
+        <span style="font-family:var(--mono);font-size:11px;color:var(--text-3)">••••••••</span>
+        <span style="font-size:11.5px;color:${sec.configured ? "var(--ok)" : "var(--danger)"}">${sec.configured ? t("wizSecretOk") : t("wizSecretSkip")}</span>
+      </div>`).join("");
+    $("view-wizard").innerHTML = wizHeader() + `
+      <div style="display:grid;grid-template-columns:1fr 1.2fr;gap:16px;max-width:1100px;margin:0 auto" class="wiz-cols">
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard" style="padding:22px;gap:16px;overflow:visible">
+            <div style="display:flex;align-items:center;gap:13px">
+              <div class="proj-icon" style="width:46px;height:46px;background:${hexSoft(kind.color, 0.14)}">
+                <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="${kind.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${kind.icon}</svg>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:3px">
+                <div style="display:flex;align-items:center;gap:9px">
+                  <span style="font-size:17px;font-weight:700">${t("wizDetected", techLabel())}</span>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5 L9.5 17.5 L19.5 6.5"></path></svg>
+                </div>
+                <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">${esc(repoFull)} · ${esc(p.branch)}</span>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--text-2)">
+              <div style="display:flex;align-items:center;gap:8px"><span class="mini-dot2" style="background:var(--ok)"></span><span>${evidence}</span></div>
+              <div style="display:flex;align-items:center;gap:8px"><span class="mini-dot2" style="background:var(--ok)"></span><span>${dockerNote}</span></div>
+              <div style="display:flex;align-items:center;gap:8px"><span class="mini-dot2" style="background:var(--text-3)"></span><span>${t("wizNoDb")}</span></div>
+            </div>
+          </div>
+          <div class="warn-strip">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#eab308" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none"><path d="M12 3 L22 20 L2 20 Z"></path><path d="M12 9.5v4.5"></path></svg>
+            <span>${t("wizWarn", esc(repoFull))}</span>
+          </div>
+          <button class="btn-primary" id="wiz-provision" style="justify-content:center;height:46px;font-size:14px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12 L12 5 L19 12"></path><path d="M12 5 L12 19"></path></svg>
+            ${t("wizCreate")}
+          </button>
+          ${wiz.error ? `<div class="warn-strip">${esc(wiz.error)}</div>` : ""}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("wizPlan", (p.files || []).length)}</span><span class="sub">${t("wizPlanVia", p.template)}</span></div>
+            ${files}
+          </div>
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("wizSecrets", (p.secrets || []).length)}</span><span class="sub">${t("wizSecretsNote")}</span></div>
+            ${secrets}
+          </div>
+        </div>
+      </div>`;
+    wireWizCommon();
+    $("wiz-provision").addEventListener("click", async () => {
+      $("wiz-provision").disabled = true;
+      try {
+        const res = await fetch(`/api/v1/projects/${encodeURIComponent(p.slug)}/provision`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) { wiz.error = t("wizError", data.error || res.status); renderWizStep2(); return; }
+        wiz.step = 3; wiz.provision = data; wiz.slug = p.slug; wiz.error = null;
+        renderWizStep3(null);
+        wizPoll = setInterval(pollFirstDeploy, 5000);
+        pollFirstDeploy();
+      } catch { wiz.error = t("wizError", "network"); renderWizStep2(); }
+    });
+  }
+
+  const LANG_TO_KIND = { Rust: "rust", Elixir: "elixir", Python: "python", Go: "go", Ruby: "ruby",
+    Java: "java", Kotlin: "java", Shell: "shell", JavaScript: "node", TypeScript: "node", Vue: "node",
+    PHP: "web", HTML: "web", CSS: "web" };
+  function renderWizBlocked() {
+    const lang = wiz.plan.language || "?";
+    const kind = KINDS[LANG_TO_KIND[lang]] || KINDS.generic;
+    $("view-wizard").innerHTML = wizHeader() + `
+      <div style="display:flex;justify-content:center;padding-top:16px">
+        <div class="dcard" style="padding:34px;gap:18px;align-items:center;text-align:center;max-width:560px;overflow:visible">
+          <div class="proj-icon" style="width:54px;height:54px;background:${hexSoft(kind.color, 0.13)}">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="${kind.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${kind.icon}</svg>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <span style="font-size:17px;font-weight:700">${t("wizBlockedTitle", esc(lang))}</span>
+            <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">${esc(wiz.sel)}</span>
+          </div>
+          <span style="font-size:13.5px;color:var(--text-2);line-height:1.6;max-width:420px">${t("wizBlockedBody", esc(lang))}</span>
+          <button class="btn-ghost" id="wiz-blocked-back">${t("wizBack")}</button>
+        </div>
+      </div>`;
+    wireWizCommon();
+    $("wiz-blocked-back").addEventListener("click", () => { wiz.step = 1; wiz.plan = null; renderWizStep1(); });
+  }
+
+  function progRow(state, title, sub) {
+    const icon = state === "done"
+      ? `<div class="prog-icon" style="background:var(--ok-soft)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12.5 L9.5 17.5 L19.5 6.5"></path></svg></div>`
+      : state === "fail"
+        ? `<div class="prog-icon" style="background:rgba(229,72,77,0.14)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2.6" stroke-linecap="round"><path d="M6 6 L18 18 M18 6 L6 18"></path></svg></div>`
+        : state === "run"
+          ? `<div class="prog-icon" style="background:var(--accent-soft)"><div class="spin"></div></div>`
+          : `<div class="prog-icon" style="background:var(--surface-3)"><span class="mini-dot2" style="background:var(--text-3)"></span></div>`;
+    return `<div class="wrow" style="padding:14px 20px;${state === "wait" ? "opacity:0.55" : ""}">
+      ${icon}
+      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+        <span style="font-weight:600;font-size:13.5px">${title}</span>
+        <span style="font-size:12px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${sub}</span>
+      </div>
+    </div>`;
+  }
+
+  async function pollFirstDeploy() {
+    if (!wiz || !wiz.slug) { stopWizPoll(); return; }
+    try {
+      const d = await (await fetch(`/api/v1/projects/${encodeURIComponent(wiz.slug)}`)).json();
+      renderWizStep3(d);
+      if (d.running && d.builds && d.builds[0] && d.builds[0].status === "completed") stopWizPoll();
+    } catch {}
+  }
+
+  function renderWizStep3(detail) {
+    if (!wiz || wiz.step !== 3 || $("view-wizard").hidden) return;
+    const prov = wiz.provision;
+    const kind = wiz.plan.template === "rails" ? KINDS.ruby : KINDS.next;
+    const build = detail && detail.builds && detail.builds[0];
+    const buildState = !build ? "run" : build.status !== "completed" ? "run" : build.conclusion === "success" ? "done" : "fail";
+    const buildSub = build
+      ? `${esc(build.workflow || "Deploy")} · ${esc(build.commit_msg)} · ${build.duration_secs}s`
+      : "…";
+    const serverState = buildState === "done" ? "done" : buildState === "fail" ? "fail" : "wait";
+    const upState = detail && detail.running ? "done" : serverState === "done" ? "run" : "wait";
+    const allDone = upState === "done";
+    const failed = buildState === "fail";
+    const secretsAll = (prov.secrets || []).every((x) => x.status === "created");
+    const secretsSub = (prov.secrets || []).map((x) => `${x.name}${x.status !== "created" ? " ✗" : ""}`).join(" · ");
+    const repoUrl = `https://github.com/${wiz.sel}/actions`;
+    $("view-wizard").innerHTML = wizHeader() + `
+      <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:16px;max-width:1100px;margin:0 auto" class="wiz-cols">
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard" style="padding:20px 22px;flex-direction:row;align-items:center;gap:13px;overflow:visible">
+            <div class="proj-icon" style="width:44px;height:44px;background:${hexSoft(kind.color, 0.14)}">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="${kind.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${kind.icon}</svg>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:3px;flex:1">
+              <div style="display:flex;align-items:center;gap:9px">
+                <span style="font-size:17px;font-weight:700">${esc(wiz.plan.slug)}</span>
+                <span class="pill" style="color:${failed ? "var(--danger)" : "var(--accent)"};background:${failed ? "rgba(229,72,77,0.14)" : "var(--accent-soft)"}">${failed ? t("wizFailed") : t("wizFirstDeploy")}</span>
+              </div>
+              <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">${esc(wiz.sel)} · ${techLabel()}</span>
+            </div>
+          </div>
+          <div class="dcard">
+            <div class="dcard-title"><span class="label">${t("wizLive")}</span><span class="sub">${t("wizEvery")}</span></div>
+            ${progRow("done", t("wizStepCommit"), `${t("filesN", (prov.files || []).length)} · ${esc((prov.commit_sha || "").slice(0, 7))}`)}
+            ${progRow(secretsAll ? "done" : "fail", t("wizStepSecrets"), esc(secretsSub))}
+            ${progRow(buildState, t("wizStepBuild"), buildSub)}
+            ${progRow(serverState, t("wizStepServer"), "webo-deploy · pull + compose up")}
+            ${progRow(upState, t("wizStepUp"), t("wizStepUpSub"))}
+          </div>
+          ${allDone ? `<button class="btn-primary" id="wiz-see-project" style="justify-content:center;height:46px;font-size:14px">${t("wizSeeProject")}</button>` : ""}
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="dcard" style="padding:20px 22px;gap:12px;overflow:visible">
+            <span class="label">${t("wizMeanwhile")}</span>
+            <span style="font-size:13px;color:var(--text-2);line-height:1.55">${t("wizCanClose")}</span>
+            <a class="btn-ghost" style="width:fit-content;text-decoration:none" href="${repoUrl}" target="_blank" rel="noopener">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M9 19c-4 1.5-4-2-6-2"></path></svg>
+              ${t("wizSeeRun")}
+            </a>
+          </div>
+        </div>
+      </div>`;
+    wireWizCommon();
+    const see = $("wiz-see-project");
+    if (see) see.addEventListener("click", () => closeWizard(true));
+  }
+
+  function wireWizCommon() {
+    const back = $("wiz-back");
+    if (back) back.addEventListener("click", () => {
+      if (!wiz) return;
+      if (wiz.step === 2) { wiz.step = 1; wiz.plan = null; wiz.error = null; renderWizStep1(); }
+      else if (wiz.step === 3) { closeWizard(false); }
+      else closeWizard(false);
+    });
+  }
+
+  async function openWizard() {
+    stopWizPoll();
+    wiz = { step: 1, repos: null, q: "", sel: null };
+    ["view-overview", "view-processes", "view-projects", "view-project-detail"].forEach((v) => { $(v).hidden = true; });
+    $("view-wizard").hidden = false;
+    renderWizStep1();
+    try {
+      const res = await fetch("/api/v1/github/repos");
+      const data = await res.json();
+      if (!res.ok) { wiz.error = t("wizError", data.error || res.status); }
+      else wiz.repos = data.repos || [];
+    } catch { wiz.error = t("wizError", "network"); }
+    if (wiz && wiz.step === 1) renderWizStep1();
+  }
+  $("wiz-open").addEventListener("click", openWizard);
+
   // ---------- tabs ----------
   const tabs = [
     { btn: "tab-overview", views: ["view-overview"] },
     { btn: "tab-processes", views: ["view-processes"] },
     { btn: "tab-projects", views: ["view-projects", "view-project-detail"] },
   ];
-  const allViews = ["view-overview", "view-processes", "view-projects", "view-project-detail"];
+  const allViews = ["view-overview", "view-processes", "view-projects", "view-project-detail", "view-wizard"];
   tabs.forEach(({ btn, views }) => {
     $(btn).addEventListener("click", () => {
       tabs.forEach((tb) => $(tb.btn).classList.toggle("on", tb.btn === btn));
       allViews.forEach((v) => { $(v).hidden = true; });
+      stopWizPoll(); wiz = null;
       if (btn === "tab-projects" && currentProject) {
         $("view-project-detail").hidden = false;
       } else {

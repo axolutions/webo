@@ -16,6 +16,8 @@ bollard = "0.18"
 futures-util = "0.3"
 ureq = { version = "2", features = ["json"] }
 time = { version = "0.3", features = ["parsing", "formatting"] }
+crypto_box = { version = "0.9", features = ["seal"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

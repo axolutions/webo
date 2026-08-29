@@ -122,16 +122,227 @@ fn api_base() -> String {
     std::env::var("WEBO_GITHUB_API_BASE").unwrap_or_else(|_| "https://api.github.com".into())
 }
 
-fn get(token: &str, url: &str) -> Option<serde_json::Value> {
-    ureq::get(url)
+fn request(token: &str, method: &str, url: &str, body: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let req = ureq::request(method, url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("User-Agent", "webo")
         .set("X-GitHub-Api-Version", "2022-11-28")
-        .timeout(Duration::from_secs(15))
-        .call()
+        .timeout(Duration::from_secs(20));
+    let res = match body {
+        Some(b) => req.send_json(b.clone()),
+        None => req.call(),
+    }
+    .ok()?;
+    // 204 (secret PUT) has no body
+    Some(res.into_json::<serde_json::Value>().unwrap_or(serde_json::Value::Null))
+}
+
+fn get(token: &str, url: &str) -> Option<serde_json::Value> {
+    request(token, "GET", url, None)
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RepoInfo {
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
+    pub language: Option<String>,
+    pub pushed_at: i64,
+    pub default_branch: String,
+}
+
+/// Parse the /user/repos listing.
+pub fn parse_repo_list(json: &serde_json::Value) -> Vec<RepoInfo> {
+    json.as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .filter_map(|r| {
+                    Some(RepoInfo {
+                        owner: r.get("owner")?.get("login")?.as_str()?.to_string(),
+                        name: r.get("name")?.as_str()?.to_string(),
+                        private: r.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+                        language: r.get("language").and_then(|v| v.as_str()).map(String::from),
+                        pushed_at: r
+                            .get("pushed_at")
+                            .and_then(|v| v.as_str())
+                            .map(ts_of)
+                            .unwrap_or(0),
+                        default_branch: r
+                            .get("default_branch")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("main")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn list_repos(token: &str) -> Vec<RepoInfo> {
+    let base = api_base();
+    get(
+        token,
+        &format!("{base}/user/repos?per_page=100&sort=pushed&affiliation=owner,organization_member"),
+    )
+    .as_ref()
+    .map(parse_repo_list)
+    .unwrap_or_default()
+}
+
+/// Fetch one file's text content (contents API, base64-encoded body).
+pub fn get_file(token: &str, owner: &str, repo: &str, path: &str) -> Option<String> {
+    use base64::Engine;
+    let base = api_base();
+    let json = get(token, &format!("{base}/repos/{owner}/{repo}/contents/{path}"))?;
+    let content = json.get("content")?.as_str()?.replace(['\n', '\r'], "");
+    let bytes = base64::engine::general_purpose::STANDARD.decode(content).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+pub fn repo_info(token: &str, owner: &str, repo: &str) -> Option<RepoInfo> {
+    let base = api_base();
+    let r = get(token, &format!("{base}/repos/{owner}/{repo}"))?;
+    Some(RepoInfo {
+        owner: owner.to_string(),
+        name: repo.to_string(),
+        private: r.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+        language: r.get("language").and_then(|v| v.as_str()).map(String::from),
+        pushed_at: 0,
+        default_branch: r
+            .get("default_branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_string(),
+    })
+}
+
+/// One commit with all scaffold files, via the Git Data API:
+/// ref → base commit → new tree → new commit → move the ref.
+pub fn commit_files(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    files: &[crate::scaffold::PlanFile],
+    message: &str,
+) -> Result<String, String> {
+    let base = api_base();
+    let head = get(token, &format!("{base}/repos/{owner}/{repo}/git/ref/heads/{branch}"))
+        .ok_or("could not read the branch head")?;
+    let head_sha = head
+        .pointer("/object/sha")
+        .and_then(|v| v.as_str())
+        .ok_or("branch head without sha")?
+        .to_string();
+    let commit = get(token, &format!("{base}/repos/{owner}/{repo}/git/commits/{head_sha}"))
+        .ok_or("could not read the head commit")?;
+    let base_tree = commit
+        .pointer("/tree/sha")
+        .and_then(|v| v.as_str())
+        .ok_or("head commit without tree")?
+        .to_string();
+
+    let entries: Vec<serde_json::Value> = files
+        .iter()
+        .map(|f| {
+            serde_json::json!({ "path": f.path, "mode": "100644", "type": "blob", "content": f.content })
+        })
+        .collect();
+    let tree = request(
+        token,
+        "POST",
+        &format!("{base}/repos/{owner}/{repo}/git/trees"),
+        Some(&serde_json::json!({ "base_tree": base_tree, "tree": entries })),
+    )
+    .ok_or("could not create the tree")?;
+    let tree_sha = tree.get("sha").and_then(|v| v.as_str()).ok_or("tree without sha")?;
+
+    let new_commit = request(
+        token,
+        "POST",
+        &format!("{base}/repos/{owner}/{repo}/git/commits"),
+        Some(&serde_json::json!({ "message": message, "tree": tree_sha, "parents": [head_sha] })),
+    )
+    .ok_or("could not create the commit")?;
+    let commit_sha = new_commit
+        .get("sha")
+        .and_then(|v| v.as_str())
+        .ok_or("commit without sha")?
+        .to_string();
+
+    request(
+        token,
+        "PATCH",
+        &format!("{base}/repos/{owner}/{repo}/git/refs/heads/{branch}"),
+        Some(&serde_json::json!({ "sha": commit_sha })),
+    )
+    .ok_or("could not move the branch")?;
+    Ok(commit_sha)
+}
+
+/// Encrypt a secret value for the repo's public key (libsodium sealed box).
+pub fn seal_secret(public_key_b64: &str, value: &str) -> Option<String> {
+    use base64::Engine;
+    let key_bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(public_key_b64)
         .ok()?
-        .into_json()
+        .try_into()
+        .ok()?;
+    let pk = crypto_box::PublicKey::from(key_bytes);
+    let sealed = pk.seal(&mut crypto_box::aead::OsRng, value.as_bytes()).ok()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(sealed))
+}
+
+pub fn set_secret(token: &str, owner: &str, repo: &str, name: &str, value: &str) -> Result<(), String> {
+    let base = api_base();
+    let key = get(token, &format!("{base}/repos/{owner}/{repo}/actions/secrets/public-key"))
+        .ok_or("could not read the repo public key")?;
+    let key_id = key.get("key_id").and_then(|v| v.as_str()).ok_or("public key without id")?;
+    let key_b64 = key.get("key").and_then(|v| v.as_str()).ok_or("public key without key")?;
+    let encrypted = seal_secret(key_b64, value).ok_or("could not encrypt the secret")?;
+    request(
+        token,
+        "PUT",
+        &format!("{base}/repos/{owner}/{repo}/actions/secrets/{name}"),
+        Some(&serde_json::json!({ "encrypted_value": encrypted, "key_id": key_id })),
+    )
+    .ok_or("could not store the secret")?;
+    Ok(())
+}
+
+/// Fast follow of a project's first deploy: refresh its builds every 10 s
+/// (the regular sync is too slow for a live wizard) until the run completes.
+pub async fn watch_first_deploy(store: Arc<Store>, slug: String, owner: String, name: String) {
+    let Ok(token) = std::env::var("WEBO_GITHUB_TOKEN") else { return };
+    let Ok(Some(p)) = store.project_by_slug(&slug) else { return };
+    for _ in 0..90 {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let base = api_base();
+        let done = tokio::task::spawn_blocking({
+            let (token, store, base) = (token.clone(), store.clone(), base.clone());
+            let (owner, name) = (owner.clone(), name.clone());
+            move || {
+                let json = get(&token, &format!("{base}/repos/{owner}/{name}/actions/runs?per_page=5"))?;
+                let builds = parse_runs(&json);
+                let done = builds.first().is_some_and(|b| b.status == "completed");
+                if !builds.is_empty() {
+                    let _ = store.replace_builds(p.id, &builds);
+                }
+                Some(done)
+            }
+        })
+        .await
         .ok()
+        .flatten()
+        .unwrap_or(false);
+        if done {
+            let _ = store.set_status(&slug, None);
+            return;
+        }
+    }
+    let _ = store.set_status(&slug, None);
 }
 
 fn sync_once(store: &Store, token: &str) {
@@ -281,8 +492,38 @@ mod tests {
         assert_eq!(tech_from_languages(&json!([])), None);
     }
 
+    #[test]
+    fn parse_repo_list_extracts_repos() {
+        let payload = json!([
+            {"name": "axofin", "owner": {"login": "murichristopher"}, "private": true,
+             "language": "Ruby", "pushed_at": "2026-08-29T01:00:00Z", "default_branch": "main"},
+            {"name": "broken"}
+        ]);
+        let repos = parse_repo_list(&payload);
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].owner, "murichristopher");
+        assert_eq!(repos[0].name, "axofin");
+        assert!(repos[0].private);
+        assert_eq!(repos[0].language.as_deref(), Some("Ruby"));
+        assert_eq!(repos[0].default_branch, "main");
+        assert!(repos[0].pushed_at > 0);
+    }
+
+    #[test]
+    fn seal_secret_produces_a_sealed_box() {
+        use base64::Engine;
+        let sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);
+        let pk_b64 = base64::engine::general_purpose::STANDARD.encode(sk.public_key().to_bytes());
+        let sealed = seal_secret(&pk_b64, "super-secret").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD.decode(sealed).unwrap();
+        // ephemeral pk (32) + tag (16) + plaintext
+        assert_eq!(bytes.len(), 32 + 16 + "super-secret".len());
+        assert!(seal_secret("not base64!!", "x").is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_once_fills_the_store_via_mock_api() {
+        let _env = crate::testutil::env_lock();
         use axum::routing::get as axget;
         let runs = json!({
             "workflow_runs": [{

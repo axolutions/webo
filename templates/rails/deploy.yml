@@ -1,0 +1,35 @@
+# Scaffolded by webo — build on GitHub Actions, image on GHCR, deploy via webo-deploy.
+name: Deploy
+on:
+  push:
+    branches: [{{branch}}]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "📥 Check out app"
+        uses: actions/checkout@v4
+
+      - name: "🧰 Check out webo-deploy"
+        uses: actions/checkout@v4
+        with:
+          repository: axolutions/webo-deploy
+          token: ${{ secrets.WEBO_DEPLOY_TOKEN }}
+          path: .webo-deploy
+
+      - name: "🛸 webo-deploy"
+        uses: ./.webo-deploy
+        with:
+          app: {{slug}}
+          dockerfile: Dockerfile
+          compose_files: deploy/docker-compose.yml deploy/docker-compose.homelab.yml
+          service: {{slug}}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          ts-oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          ts-oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}

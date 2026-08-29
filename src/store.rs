@@ -88,11 +88,18 @@ CREATE TABLE IF NOT EXISTS versions (
 CREATE INDEX IF NOT EXISTS idx_versions_project ON versions (project_id, created_at DESC);
 ";
 
+/// Additive migrations for databases created by older versions —
+/// CREATE TABLE IF NOT EXISTS never alters an existing table.
+fn migrate(conn: &Connection) {
+    let _ = conn.execute("ALTER TABLE builds ADD COLUMN workflow TEXT NOT NULL DEFAULT ''", []);
+}
+
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -100,6 +107,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&conn);
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -330,6 +338,37 @@ mod tests {
         }]).unwrap();
         assert_eq!(s.builds(a, 10).unwrap().len(), 1);
         assert!(s.builds(b_id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn open_migrates_a_pre_workflow_database() {
+        let dir = std::env::temp_dir().join(format!("webo-migrate-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        {
+            // simulate a database created before the workflow column existed
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, server_id TEXT NOT NULL DEFAULT 'local',
+                    slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, source TEXT NOT NULL,
+                    compose_project TEXT, repo_owner TEXT, repo_name TEXT, domain TEXT, created_at INTEGER NOT NULL);
+                 CREATE TABLE builds (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL,
+                    run_id INTEGER NOT NULL, status TEXT NOT NULL, conclusion TEXT,
+                    commit_sha TEXT NOT NULL, commit_msg TEXT NOT NULL, branch TEXT NOT NULL,
+                    duration_secs INTEGER NOT NULL, created_at INTEGER NOT NULL,
+                    UNIQUE (project_id, run_id));",
+            ).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        s.upsert_discovered("codo", "codo", None, None, 1).unwrap();
+        let id = s.project_by_slug("codo").unwrap().unwrap().id;
+        s.replace_builds(id, &[Build {
+            run_id: 1, workflow: "Deploy".into(), status: "completed".into(),
+            conclusion: Some("success".into()), commit_sha: "x".into(), commit_msg: "m".into(),
+            branch: "main".into(), duration_secs: 1, created_at: 1,
+        }]).unwrap();
+        assert_eq!(s.builds(id, 10).unwrap()[0].workflow, "Deploy");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

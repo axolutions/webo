@@ -273,6 +273,84 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
     }
 }
 
+#[derive(Clone, Copy, Default, serde::Deserialize)]
+pub struct TeardownOpts {
+    #[serde(default)]
+    pub containers: bool,
+    #[serde(default)]
+    pub volumes: bool,
+    #[serde(default)]
+    pub images: bool,
+}
+
+#[derive(Default, serde::Serialize)]
+pub struct TeardownReport {
+    pub containers_removed: usize,
+    pub volumes_removed: usize,
+    pub images_removed: usize,
+}
+
+/// Tears down a project's docker footprint per the user's selection.
+/// Best-effort: whatever fails is skipped and simply not counted.
+pub async fn teardown(compose_project: &str, opts: TeardownOpts) -> TeardownReport {
+    let mut report = TeardownReport::default();
+    let Ok(docker) = Docker::connect_with_unix_defaults() else { return report };
+    let mut filters = HashMap::new();
+    filters.insert("label".to_string(), vec![format!("{COMPOSE_LABEL}={compose_project}")]);
+    let Ok(containers) = docker
+        .list_containers(Some(ListContainersOptions { all: true, filters, ..Default::default() }))
+        .await
+    else {
+        return report;
+    };
+
+    let mut volume_names: Vec<String> = Vec::new();
+    let mut image_ids: Vec<String> = Vec::new();
+    for c in &containers {
+        if let Some(ms) = &c.mounts {
+            volume_names.extend(ms.iter().filter_map(|m| m.name.clone()));
+        }
+        if let Some(id) = &c.image_id {
+            image_ids.push(id.clone());
+        }
+    }
+    volume_names.sort();
+    volume_names.dedup();
+    image_ids.sort();
+    image_ids.dedup();
+
+    if opts.containers {
+        for c in &containers {
+            let Some(id) = &c.id else { continue };
+            if docker
+                .remove_container(
+                    id,
+                    Some(bollard::container::RemoveContainerOptions { force: true, ..Default::default() }),
+                )
+                .await
+                .is_ok()
+            {
+                report.containers_removed += 1;
+            }
+        }
+    }
+    if opts.volumes {
+        for name in &volume_names {
+            if docker.remove_volume(name, None).await.is_ok() {
+                report.volumes_removed += 1;
+            }
+        }
+    }
+    if opts.images {
+        for id in &image_ids {
+            if docker.remove_image(id, None, None).await.is_ok() {
+                report.images_removed += 1;
+            }
+        }
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +441,39 @@ mod tests {
         let p = store.project_by_slug("webo-test-proj").unwrap().expect("persisted");
         assert_eq!(p.source, "discovered");
         assert_eq!(p.domain.as_deref(), Some("test.example.com"));
+    }
+
+    /// Live teardown against a disposable container (skips without docker).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn teardown_removes_labeled_containers() {
+        use std::process::Command;
+        let name = format!("webo-del-{}", std::process::id());
+        let ok = Command::new("docker")
+            .args([
+                "run", "-d", "--name", &name,
+                "--label", "com.docker.compose.project=webo-del-proj",
+                "alpine:3", "sleep", "60",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("docker unavailable — skipping teardown test");
+            return;
+        }
+        // selection off: nothing is touched
+        let report = teardown("webo-del-proj", TeardownOpts::default()).await;
+        assert_eq!(report.containers_removed, 0);
+        // containers selected: the labeled container goes away
+        let report = teardown(
+            "webo-del-proj",
+            TeardownOpts { containers: true, volumes: false, images: false },
+        )
+        .await;
+        assert_eq!(report.containers_removed, 1);
+        let gone = Command::new("docker").args(["inspect", &name]).output().unwrap();
+        assert!(!gone.status.success(), "container removed");
+        let _ = Command::new("docker").args(["rm", "-f", &name]).output();
     }
 
     #[test]

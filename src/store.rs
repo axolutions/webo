@@ -194,6 +194,12 @@ impl Store {
         Ok(())
     }
 
+    /// Removes the project row; builds and versions go with it (CASCADE).
+    pub fn delete_project(&self, slug: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM projects WHERE slug = ?1", params![slug])? > 0)
+    }
+
     pub fn set_status(&self, slug: &str, status: Option<&str>) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("UPDATE projects SET status = ?1 WHERE slug = ?2", params![status, slug])?;
@@ -423,6 +429,22 @@ mod tests {
         s.set_tech_if_empty("codo", "rust").unwrap();
         s.set_tech_if_empty("codo", "ruby").unwrap();
         assert_eq!(s.project_by_slug("codo").unwrap().unwrap().tech.as_deref(), Some("rust"));
+    }
+
+    #[test]
+    fn delete_project_cascades_builds_and_versions() {
+        let s = store();
+        s.upsert_discovered("cafe", "cafe", None, None, 1).unwrap();
+        let id = s.project_by_slug("cafe").unwrap().unwrap().id;
+        s.replace_builds(id, &[Build {
+            run_id: 1, workflow: "Deploy".into(), status: "completed".into(), conclusion: None,
+            commit_sha: "x".into(), commit_msg: "m".into(), branch: "main".into(),
+            duration_secs: 1, created_at: 1,
+        }]).unwrap();
+        assert!(s.delete_project("cafe").unwrap());
+        assert!(s.project_by_slug("cafe").unwrap().is_none());
+        assert!(s.builds(id, 10).unwrap().is_empty(), "builds gone with the project");
+        assert!(!s.delete_project("cafe").unwrap(), "second delete is a no-op");
     }
 
     #[test]

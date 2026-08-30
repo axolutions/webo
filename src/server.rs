@@ -30,7 +30,7 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/processes", get(processes))
         .route("/api/v1/system", get(system))
         .route("/api/v1/projects", get(projects_list).post(project_create))
-        .route("/api/v1/projects/{slug}", get(project_detail))
+        .route("/api/v1/projects/{slug}", get(project_detail).delete(project_delete))
         .route("/api/v1/projects/{slug}/provision", axum::routing::post(project_provision))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
@@ -348,6 +348,30 @@ async fn project_provision(
     }
 }
 
+async fn project_delete(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(opts): Json<projects::TeardownOpts>,
+) -> impl IntoResponse {
+    if slug == "webo" {
+        return err(StatusCode::FORBIDDEN, "webo cannot delete itself");
+    }
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let compose = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
+    let report = projects::teardown(&compose, opts).await;
+    let _ = api.store.delete_project(&slug);
+    api.state.write().await.projects_live.remove(&slug);
+    Json(serde_json::json!({
+        "deleted": true,
+        "containers_removed": report.containers_removed,
+        "volumes_removed": report.volumes_removed,
+        "images_removed": report.images_removed,
+    }))
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +579,49 @@ mod tests {
         let (status, json) = get_json("/api/v1/projects/nope").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(json["error"], "project not found");
+    }
+
+    async fn delete_json(api: Api, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let res = app(api)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_webo_and_unknown() {
+        let api = api_with_data();
+        api.store.upsert_discovered("webo", "webo", None, None, 1).unwrap();
+        let (status, json) = delete_json(api.clone(), "/api/v1/projects/webo", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"], "webo cannot delete itself");
+        let (status, _) = delete_json(api.clone(), "/api/v1/projects/nope", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_registration_and_live_state() {
+        let api = api_with_data();
+        let (status, json) = delete_json(
+            api.clone(),
+            "/api/v1/projects/codo",
+            serde_json::json!({"containers": false, "volumes": false, "images": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["deleted"], true);
+        assert!(api.store.project_by_slug("codo").unwrap().is_none());
+        assert!(!api.state.read().await.projects_live.contains_key("codo"));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 use crate::metrics::State;
 use crate::store::Store;
-use crate::{github, projects, scaffold};
+use crate::{cloudflare, github, projects, scaffold};
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
@@ -32,6 +32,7 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects", get(projects_list).post(project_create))
         .route("/api/v1/projects/{slug}", get(project_detail).delete(project_delete))
         .route("/api/v1/projects/{slug}/provision", axum::routing::post(project_provision))
+        .route("/api/v1/projects/{slug}/domain", axum::routing::put(domain_connect).delete(domain_disconnect))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
 }
@@ -95,6 +96,7 @@ async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
                 "repo": p.repo_owner.as_ref().zip(p.repo_name.as_ref())
                     .map(|(o, n)| format!("{o}/{n}")),
                 "domain": p.domain,
+                "url": p.custom_domain.clone().or_else(|| p.auto_domain.clone()).map(|h| format!("https://{h}")),
                 "tech": p.tech,
                 "status": p.status,
                 "running": live.is_some(),
@@ -129,6 +131,11 @@ async fn project_detail(
         "repo_owner": p.repo_owner,
         "repo_name": p.repo_name,
         "domain": p.domain,
+        "auto_domain": p.auto_domain,
+        "custom_domain": p.custom_domain,
+        "port": p.port,
+        "tunnel_target": cloudflare::Cloudflare::from_env().map(|cf| cf.tunnel_target()),
+        "domains_available": cloudflare::Cloudflare::from_env().is_some(),
         "tech": p.tech,
         "status": p.status,
         "running": !live.containers.is_empty(),
@@ -305,10 +312,8 @@ async fn project_provision(
                 scaffold::Template::Rails => "rails",
                 scaffold::Template::Next => "next",
             };
-            let sha = github::commit_files(
-                &token, &owner, &name, &scan.branch, &files,
-                &format!("chore: webo scaffold ({label})"),
-            )?;
+            // Secrets FIRST: the commit triggers the workflow immediately, and a
+            // job reads its secrets at start — writing them after would race.
             let secrets: Vec<serde_json::Value> = scaffold::SECRET_NAMES
                 .iter()
                 .map(|sname| {
@@ -322,6 +327,10 @@ async fn project_provision(
                     serde_json::json!({ "name": sname, "status": status })
                 })
                 .collect();
+            let sha = github::commit_files(
+                &token, &owner, &name, &scan.branch, &files,
+                &format!("chore: webo scaffold ({label})"),
+            )?;
             Ok::<_, String>((sha, files, secrets))
         }
     })
@@ -330,6 +339,7 @@ async fn project_provision(
     match result {
         Ok(Ok((sha, files, secrets))) => {
             let _ = api.store.set_status(&slug, Some("deploying"));
+            let domain = reserve_domain(&api, &slug).await;
             tokio::spawn(github::watch_first_deploy(
                 api.store.clone(),
                 slug.clone(),
@@ -340,6 +350,7 @@ async fn project_provision(
                 "commit_sha": sha,
                 "files": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
                 "secrets": secrets,
+                "auto_domain": domain,
             }))
             .into_response()
         }
@@ -361,8 +372,20 @@ async fn project_delete(
     };
     let compose = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
     let report = projects::teardown(&compose, opts).await;
+    // release the hostnames before forgetting the project
+    for host in [p.auto_domain.clone(), p.custom_domain.clone()].into_iter().flatten() {
+        if let Some(cf) = cloudflare::Cloudflare::from_env() {
+            if cloudflare::split_host(&host, &cf.apps_zone).is_some() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    cloudflare::Cloudflare::from_env().map(|cf| cf.delete_dns(&host))
+                })
+                .await;
+            }
+        }
+    }
     let _ = api.store.delete_project(&slug);
     api.state.write().await.projects_live.remove(&slug);
+    sync_routes(&api).await;
     Json(serde_json::json!({
         "deleted": true,
         "containers_removed": report.containers_removed,
@@ -370,6 +393,133 @@ async fn project_delete(
         "images_removed": report.images_removed,
     }))
     .into_response()
+}
+
+/// Reserves the project's auto domain (once) and publishes its tunnel route.
+/// Everything here is best-effort: without Cloudflare configured the project
+/// is created all the same, just without a URL.
+async fn reserve_domain(api: &Api, slug: &str) -> Option<String> {
+    let cf = cloudflare::Cloudflare::from_env()?;
+    let existing = api.store.project_by_slug(slug).ok().flatten()?.auto_domain;
+    let host = match existing {
+        Some(h) => h,
+        None => {
+            let taken: Vec<String> = api
+                .store
+                .projects()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|p| p.auto_domain)
+                .collect();
+            let mut label = cloudflare::random_label_os();
+            for _ in 0..5 {
+                let candidate = format!("{label}.{}", cf.apps_zone);
+                if !taken.contains(&candidate) {
+                    break;
+                }
+                label = cloudflare::random_label_os();
+            }
+            let host = format!("{label}.{}", cf.apps_zone);
+            let slug_owned = slug.to_string();
+            let label_owned = label.clone();
+            let created = tokio::task::spawn_blocking(move || {
+                cloudflare::Cloudflare::from_env()
+                    .map(|cf| cf.create_dns(&label_owned, &format!("webo: {slug_owned}")))
+            })
+            .await
+            .ok()
+            .flatten();
+            if !matches!(created, Some(Ok(()))) {
+                return None;
+            }
+            let _ = api.store.set_auto_domain_if_empty(slug, &host, 3000);
+            host
+        }
+    };
+    sync_routes(api).await;
+    Some(host)
+}
+
+/// Pushes every hostname webo manages into the tunnel configuration,
+/// preserving rules it does not own.
+async fn sync_routes(api: &Api) {
+    let Ok(routes) = api.store.routes() else { return };
+    let _ = tokio::task::spawn_blocking(move || {
+        let Some(cf) = cloudflare::Cloudflare::from_env() else { return };
+        if let Ok(current) = cf.ingress() {
+            let merged = cloudflare::merge_ingress(&current, &routes);
+            let _ = cf.put_ingress(merged);
+        }
+    })
+    .await;
+}
+
+#[derive(Deserialize)]
+struct DomainReq {
+    domain: String,
+}
+
+async fn domain_connect(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<DomainReq>,
+) -> impl IntoResponse {
+    let Some(cf) = cloudflare::Cloudflare::from_env() else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "cloudflare not configured");
+    };
+    let host = req.domain.trim().trim_start_matches("https://").trim_end_matches('/').to_string();
+    if !cloudflare::valid_hostname(&host) {
+        return err(StatusCode::BAD_REQUEST, "invalid domain");
+    }
+    if api.store.project_by_slug(&slug).ok().flatten().is_none() {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    }
+    // In our own zone webo creates the CNAME; elsewhere the user points it.
+    let in_our_zone = cloudflare::split_host(&host, &cf.apps_zone).is_some();
+    let dns = if in_our_zone {
+        let label = cloudflare::split_host(&host, &cf.apps_zone).map(|(l, _)| l.to_string()).unwrap_or_default();
+        let slug_owned = slug.clone();
+        tokio::task::spawn_blocking(move || {
+            cloudflare::Cloudflare::from_env().map(|cf| cf.create_dns(&label, &format!("webo: {slug_owned}")))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(Ok(()))
+    } else {
+        Ok(())
+    };
+    if let Err(e) = dns {
+        return err(StatusCode::BAD_GATEWAY, &e);
+    }
+    let _ = api.store.set_custom_domain(&slug, Some(&host));
+    sync_routes(&api).await;
+    Json(serde_json::json!({
+        "domain": host,
+        "dns_managed": in_our_zone,
+        "cname_target": cf.tunnel_target(),
+    }))
+    .into_response()
+}
+
+async fn domain_disconnect(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if let (Some(host), Some(cf)) = (p.custom_domain.clone(), cloudflare::Cloudflare::from_env()) {
+        if cloudflare::split_host(&host, &cf.apps_zone).is_some() {
+            let _ = tokio::task::spawn_blocking(move || {
+                cloudflare::Cloudflare::from_env().map(|cf| cf.delete_dns(&host))
+            })
+            .await;
+        }
+    }
+    let _ = api.store.set_custom_domain(&slug, None);
+    sync_routes(&api).await;
+    Json(serde_json::json!({ "disconnected": true })).into_response()
 }
 
 #[cfg(test)]
@@ -622,6 +772,133 @@ mod tests {
         assert_eq!(json["deleted"], true);
         assert!(api.store.project_by_slug("codo").unwrap().is_none());
         assert!(!api.state.read().await.projects_live.contains_key("codo"));
+    }
+
+    #[tokio::test]
+    async fn domain_endpoints_need_cloudflare() {
+        let _env = crate::testutil::env_lock();
+        for k in ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
+            std::env::remove_var(k);
+        }
+        let res = app(api_with_data())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/projects/codo/domain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"domain":"loja.example.com"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // and the detail says domains are unavailable instead of breaking
+        let (status, json) = get_json("/api/v1/projects/codo").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["domains_available"], false);
+        assert_eq!(json["auto_domain"], serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn domain_connect_and_disconnect_against_a_mock_cloudflare() {
+        let _env = crate::testutil::env_lock();
+        use axum::routing::{delete as axdelete, get as axget, post as axpost, put as axput};
+        use serde_json::json;
+        let router = axum::Router::new()
+            .route("/zones/{z}/dns_records", axpost(|| async { axum::Json(json!({"success": true, "result": {"id": "rec1"}})) })
+                .get(|| async { axum::Json(json!({"success": true, "result": [{"id": "rec1"}]})) }))
+            .route("/zones/{z}/dns_records/{id}", axdelete(|| async { axum::Json(json!({"success": true, "result": {}})) }))
+            .route("/accounts/{a}/cfd_tunnel/{t}/configurations",
+                axget(|| async { axum::Json(json!({"success": true, "result": {"config": {"ingress": [
+                    {"hostname": "keep.example.com", "service": "http://keep:1"},
+                    {"service": "http_status:404"}]}}})) })
+                .put(|body: String| async move {
+                    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    let rules = v["config"]["ingress"].as_array().unwrap();
+                    // the untouched rule survives and the catch-all stays last
+                    assert_eq!(rules[0]["hostname"], "keep.example.com");
+                    assert_eq!(rules.last().unwrap()["service"], "http_status:404");
+                    axum::Json(json!({"success": true, "result": {}}))
+                }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        std::env::set_var("WEBO_CF_API_BASE", format!("http://{addr}"));
+        std::env::set_var("CLOUDFLARE_API_TOKEN", "t");
+        std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acc");
+        std::env::set_var("CLOUDFLARE_ZONE_ID", "zone");
+        std::env::set_var("WEBO_TUNNEL_ID", "tun");
+        std::env::set_var("WEBO_APPS_ZONE", "example.com");
+
+        let api = api_with_data();
+        // a domain in our own zone: webo creates the DNS itself
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/projects/codo/domain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"domain":"https://loja.example.com/"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["domain"], "loja.example.com", "scheme and slash trimmed");
+        assert_eq!(json["dns_managed"], true);
+        assert_eq!(json["cname_target"], "tun.cfargotunnel.com");
+        assert_eq!(api.store.project_by_slug("codo").unwrap().unwrap().custom_domain.as_deref(), Some("loja.example.com"));
+
+        // a third-party zone: webo only routes and hands over the CNAME target
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/projects/codo/domain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"domain":"app.cliente.com.br"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["dns_managed"], false);
+
+        // invalid input is refused
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/projects/codo/domain")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"domain":"nao e dominio"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // disconnect clears it
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/projects/codo/domain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(api.store.project_by_slug("codo").unwrap().unwrap().custom_domain, None);
+
+        for k in ["WEBO_CF_API_BASE", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
+            std::env::remove_var(k);
+        }
     }
 
     #[tokio::test]

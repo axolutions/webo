@@ -1,3 +1,4 @@
+pub mod cloudflare;
 pub mod collector;
 pub mod metrics;
 pub mod projects;

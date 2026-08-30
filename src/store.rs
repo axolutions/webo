@@ -28,6 +28,9 @@ pub struct Project {
     /// Wizard lifecycle: NULL for plain projects; 'provisioning' | 'deploying'
     /// while the first deploy is in flight.
     pub status: Option<String>,
+    pub auto_domain: Option<String>,
+    pub custom_domain: Option<String>,
+    pub port: Option<i64>,
     pub created_at: i64,
 }
 
@@ -65,6 +68,9 @@ CREATE TABLE IF NOT EXISTS projects (
     domain TEXT,
     tech TEXT,
     status TEXT,
+    auto_domain TEXT,
+    custom_domain TEXT,
+    port INTEGER,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS builds (
@@ -100,6 +106,9 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE builds ADD COLUMN workflow TEXT NOT NULL DEFAULT ''", []);
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN tech TEXT", []);
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN status TEXT", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN auto_domain TEXT", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN custom_domain TEXT", []);
+    let _ = conn.execute("ALTER TABLE projects ADD COLUMN port INTEGER", []);
 }
 
 impl Store {
@@ -147,7 +156,8 @@ impl Store {
     pub fn projects(&self) -> rusqlite::Result<Vec<Project>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, tech, status, created_at
+            "SELECT id, server_id, slug, name, source, compose_project, repo_owner, repo_name, domain, tech, status,
+                    auto_domain, custom_domain, port, created_at
              FROM projects ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -163,7 +173,10 @@ impl Store {
                 domain: r.get(8)?,
                 tech: r.get(9)?,
                 status: r.get(10)?,
-                created_at: r.get(11)?,
+                auto_domain: r.get(11)?,
+                custom_domain: r.get(12)?,
+                port: r.get(13)?,
+                created_at: r.get(14)?,
             })
         })?;
         rows.collect()
@@ -198,6 +211,39 @@ impl Store {
     pub fn delete_project(&self, slug: &str) -> rusqlite::Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("DELETE FROM projects WHERE slug = ?1", params![slug])? > 0)
+    }
+
+    /// Reserves the auto domain once — it must never change for a project.
+    pub fn set_auto_domain_if_empty(&self, slug: &str, domain: &str, port: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE projects SET auto_domain = COALESCE(auto_domain, ?1), port = COALESCE(port, ?2)
+             WHERE slug = ?3",
+            params![domain, port, slug],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_custom_domain(&self, slug: &str, domain: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE projects SET custom_domain = ?1 WHERE slug = ?2", params![domain, slug])?;
+        Ok(())
+    }
+
+    /// Every hostname webo manages, for reconciling the tunnel ingress.
+    pub fn routes(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for p in self.projects()? {
+            let service = format!(
+                "http://{}:{}",
+                p.compose_project.clone().unwrap_or_else(|| p.slug.clone()),
+                p.port.unwrap_or(3000)
+            );
+            for host in [p.auto_domain.clone(), p.custom_domain.clone()].into_iter().flatten() {
+                out.push((host, service.clone()));
+            }
+        }
+        Ok(out)
     }
 
     pub fn set_status(&self, slug: &str, status: Option<&str>) -> rusqlite::Result<()> {
@@ -419,6 +465,26 @@ mod tests {
         let p = s.project_by_slug("axofin").unwrap().unwrap();
         assert_eq!(p.source, "registered");
         assert_eq!(p.repo_owner.as_deref(), Some("murichristopher"));
+    }
+
+    #[test]
+    fn auto_domain_is_reserved_once_and_routes_are_listed() {
+        let s = store();
+        s.upsert_discovered("loja", "loja", None, None, 1).unwrap();
+        s.set_auto_domain_if_empty("loja", "cedar-mint-opal.example.com", 3000).unwrap();
+        s.set_auto_domain_if_empty("loja", "outro-nome.example.com", 8080).unwrap();
+        let p = s.project_by_slug("loja").unwrap().unwrap();
+        assert_eq!(p.auto_domain.as_deref(), Some("cedar-mint-opal.example.com"), "never changes");
+        assert_eq!(p.port, Some(3000));
+
+        s.set_custom_domain("loja", Some("loja.cliente.com")).unwrap();
+        let routes = s.routes().unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains(&("cedar-mint-opal.example.com".into(), "http://loja:3000".into())));
+        assert!(routes.contains(&("loja.cliente.com".into(), "http://loja:3000".into())));
+
+        s.set_custom_domain("loja", None).unwrap();
+        assert_eq!(s.routes().unwrap().len(), 1, "disconnected domain leaves the routes");
     }
 
     #[test]

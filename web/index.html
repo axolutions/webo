@@ -243,6 +243,17 @@
   .file-add { font-family: var(--mono); font-size: 10.5px; color: var(--ok); padding: 1px 7px; border-radius: 6px; background: var(--ok-soft); white-space: nowrap; }
   #wiz-repo-rows { max-height: 48vh; overflow-y: auto; overscroll-behavior: contain; }
   .wiz-footer { position: sticky; bottom: 16px; display: flex; justify-content: flex-end; z-index: 5; }
+  .danger-card { border-color: rgba(229, 72, 77, 0.35) !important; }
+  .btn-danger { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid rgba(229, 72, 77, 0.45); border-radius: 12px; background: rgba(229, 72, 77, 0.12); color: var(--danger); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
+  .btn-danger:hover { background: rgba(229, 72, 77, 0.2); }
+  .btn-danger.solid { background: var(--danger); color: #fff; border-color: transparent; justify-content: center; }
+  .btn-danger:disabled { opacity: 0.4; cursor: default; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(3, 6, 14, 0.7); backdrop-filter: blur(4px); display: grid; place-items: center; z-index: 50; padding: 20px; }
+  .modal-card { width: 460px; max-width: 100%; max-height: 90vh; overflow-y: auto; border-radius: 16px; background: var(--card); border: 1px solid var(--stroke-strong); box-shadow: 0 30px 70px -20px rgba(0, 0, 0, 0.8); backdrop-filter: blur(20px); padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+  .check-row { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+  .check-row input { margin-top: 2px; accent-color: var(--danger); width: 15px; height: 15px; }
+  .del-input { height: 40px; padding: 0 13px; border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2); font: inherit; font-family: var(--mono); font-size: 13px; color: var(--text); outline: none; width: 100%; }
+  .del-input:focus { border-color: var(--danger); box-shadow: 0 0 0 4px rgba(229, 72, 77, 0.15); }
   .wiz-footer .btn-primary { box-shadow: 0 10px 26px -8px rgba(0, 0, 0, 0.65), 0 10px 22px -12px var(--accent); }
   .warn-strip { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-radius: 12px; border: 1px solid rgba(234, 179, 8, 0.35); background: rgba(234, 179, 8, 0.09); font-size: 12.5px; color: var(--text-2); }
   .prog-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 999px; flex: none; }
@@ -472,6 +483,16 @@
       wizFailed: "the first deploy failed — check the run on GitHub",
       wizError: (m) => `something went wrong: ${m}`,
       filesN: (n) => `${n} files`,
+      delDanger: "Danger zone", delBtn: "delete project",
+      delTitle: (s) => `Delete ${s}`, delWhat: "What gets deleted",
+      delContainers: "stop and remove containers — the app goes offline",
+      delVolumes: "delete volumes (data) — irreversible",
+      delImages: "delete local images (frees disk, kills local rollback)",
+      delGithubNote: "The GitHub repo, scaffold and secrets stay untouched.",
+      delRediscover: "Containers keep running — discovery will re-add this project on the next tick.",
+      delType: (s) => `type ${s} to confirm`,
+      delConfirm: "delete project", delCancel: "cancel",
+      delFail: (m) => `could not delete: ${m}`,
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -545,6 +566,16 @@
       wizFailed: "o primeiro deploy falhou — veja o run no GitHub",
       wizError: (m) => `algo deu errado: ${m}`,
       filesN: (n) => `${n} arquivos`,
+      delDanger: "Zona de perigo", delBtn: "excluir projeto",
+      delTitle: (s) => `Excluir ${s}`, delWhat: "O que será apagado",
+      delContainers: "parar e remover containers — o app sai do ar",
+      delVolumes: "apagar volumes (dados) — irreversível",
+      delImages: "apagar imagens locais (libera disco, mata o rollback local)",
+      delGithubNote: "O repo no GitHub, scaffold e secrets ficam intactos.",
+      delRediscover: "Containers continuam rodando — a descoberta vai readicionar o projeto no próximo tick.",
+      delType: (s) => `digite ${s} para confirmar`,
+      delConfirm: "excluir projeto", delCancel: "cancelar",
+      delFail: (m) => `não foi possível excluir: ${m}`,
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -1066,6 +1097,17 @@
               <div style="display:flex;justify-content:space-between;font-size:13px;padding-top:10px;border-top:1px solid var(--stroke)"><span style="font-weight:600">${t("totalLbl")}</span><span class="cell-num">${fmtMem(total)}</span></div>
             </div>
           </div>
+          ${d.slug !== "webo" ? `
+          <div class="dcard danger-card">
+            <div class="dcard-title"><span class="label" style="color:var(--danger)">${t("delDanger")}</span></div>
+            <div style="padding:16px 20px;display:flex;flex-direction:column;gap:10px">
+              <span class="sub">${t("delGithubNote")}</span>
+              <button class="btn-danger" id="proj-delete" style="width:fit-content">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"></path><path d="M10 11v6M14 11v6"></path></svg>
+                ${t("delBtn")}
+              </button>
+            </div>
+          </div>` : ""}
         </div>
       </div>`;
     $("proj-back").addEventListener("click", () => {
@@ -1074,6 +1116,71 @@
       $("view-projects").hidden = false;
       tickProjects();
     });
+    const delBtn = $("proj-delete");
+    if (delBtn) delBtn.addEventListener("click", () => openDeleteModal(d));
+  }
+
+  function openDeleteModal(d) {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML = `
+      <div class="modal-card">
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <span style="font-size:17px;font-weight:700;color:var(--danger)">${t("delTitle", esc(d.name))}</span>
+          <span class="sub">${t("delGithubNote")}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <span class="label">${t("delWhat")}</span>
+          <label class="check-row"><input type="checkbox" id="del-containers" checked><span>${t("delContainers")}</span></label>
+          <label class="check-row"><input type="checkbox" id="del-volumes"><span style="color:var(--danger)">${t("delVolumes")}</span></label>
+          <label class="check-row"><input type="checkbox" id="del-images"><span>${t("delImages")}</span></label>
+          <span class="sub" id="del-warn" hidden>⚠ ${t("delRediscover")}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <span class="sub">${t("delType", `<b style="font-family:var(--mono);color:var(--text)">${esc(d.slug)}</b>`)}</span>
+          <input class="del-input" id="del-name" autocomplete="off" spellcheck="false">
+        </div>
+        <span class="sub" id="del-error" style="color:var(--danger)" hidden></span>
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+          <button class="btn-ghost" id="del-cancel">${t("delCancel")}</button>
+          <button class="btn-danger solid" id="del-go" disabled>${t("delConfirm")}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const q = (id) => overlay.querySelector("#" + id);
+    const syncWarn = () => { q("del-warn").hidden = q("del-containers").checked || !d.running; };
+    syncWarn();
+    q("del-containers").addEventListener("change", syncWarn);
+    q("del-name").addEventListener("input", () => { q("del-go").disabled = q("del-name").value.trim() !== d.slug; });
+    const close = () => overlay.remove();
+    q("del-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", (ev) => { if (ev.target === overlay) close(); });
+    q("del-go").addEventListener("click", async () => {
+      q("del-go").disabled = true;
+      try {
+        const res = await fetch(`/api/v1/projects/${encodeURIComponent(d.slug)}`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            containers: q("del-containers").checked,
+            volumes: q("del-volumes").checked,
+            images: q("del-images").checked,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        close();
+        currentProject = null;
+        $("view-project-detail").hidden = true;
+        $("view-projects").hidden = false;
+        tickProjects();
+      } catch (e) {
+        q("del-error").hidden = false;
+        q("del-error").textContent = t("delFail", e.message || "?");
+        q("del-go").disabled = false;
+      }
+    });
+    q("del-name").focus();
   }
 
   let machineMem = 0;

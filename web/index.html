@@ -244,6 +244,14 @@
   #wiz-repo-rows { max-height: 48vh; overflow-y: auto; overscroll-behavior: contain; }
   .wiz-footer { position: sticky; bottom: 16px; display: flex; justify-content: flex-end; z-index: 5; }
   .danger-card { border-color: rgba(229, 72, 77, 0.35) !important; }
+  .icon-sq { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; flex: none; }
+  .dom-input { flex: 1; min-width: 0; height: 40px; padding: 0 13px; border: 1px solid var(--stroke); border-radius: 11px; background: var(--surface-2); font-family: var(--mono); font-size: 13px; color: var(--text); outline: none; }
+  .dom-input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .btn-sm { height: 32px; padding: 0 13px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--surface-2); color: var(--text-2); font-weight: 600; font-size: 12.5px; font-family: inherit; cursor: pointer; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .btn-sm:hover { color: var(--text); border-color: var(--stroke-strong); }
+  .url-link { color: var(--accent); text-decoration: none; }
+  .url-link:hover { text-decoration: underline; }
+  .cname-box { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; border-radius: 11px; background: var(--surface); border: 1px solid var(--stroke); }
   .btn-danger { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid rgba(229, 72, 77, 0.45); border-radius: 12px; background: rgba(229, 72, 77, 0.12); color: var(--danger); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
   .btn-danger:hover { background: rgba(229, 72, 77, 0.2); }
   .btn-danger.solid { background: var(--danger); color: #fff; border-color: transparent; justify-content: center; }
@@ -493,6 +501,17 @@
       delType: (s) => `type ${s} to confirm`,
       delConfirm: "delete project", delCancel: "cancel",
       delFail: (m) => `could not delete: ${m}`,
+      domains: "Domains", domViaTunnel: "via Cloudflare Tunnel",
+      domAuto: "auto domain · created on the first deploy · never changes",
+      domOwn: "your own domain", domManaged: "DNS created by webo",
+      domPointed: "you point the DNS", domLive: "live",
+      domConnectTitle: "Connect your own domain", domConnect: "connect",
+      domPh: "app.yourdomain.com", domDisconnect: "disconnect",
+      domCopy: "copy", domCopied: "copied",
+      domCname: (t) => `Point a CNAME to ${t} — webo detects it once it propagates.`,
+      domUnavailable: "Cloudflare not configured on the server — domains unavailable",
+      domInvalid: "invalid domain", domFail: (m) => `failed: ${m}`,
+      domReserved: "Domain reserved",
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -576,6 +595,17 @@
       delType: (s) => `digite ${s} para confirmar`,
       delConfirm: "excluir projeto", delCancel: "cancelar",
       delFail: (m) => `não foi possível excluir: ${m}`,
+      domains: "Domínios", domViaTunnel: "via Cloudflare Tunnel",
+      domAuto: "domínio automático · criado no primeiro deploy · nunca muda",
+      domOwn: "domínio próprio", domManaged: "DNS criado pelo webo",
+      domPointed: "você aponta o DNS", domLive: "no ar",
+      domConnectTitle: "Conectar domínio próprio", domConnect: "conectar",
+      domPh: "app.seudominio.com.br", domDisconnect: "desconectar",
+      domCopy: "copiar", domCopied: "copiado",
+      domCname: (t) => `Aponte um CNAME para ${t} — o webo detecta assim que propagar.`,
+      domUnavailable: "Cloudflare não configurado no servidor — domínios indisponíveis",
+      domInvalid: "domínio inválido", domFail: (m) => `falhou: ${m}`,
+      domReserved: "Domínio reservado",
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -960,7 +990,9 @@
               <span style="font-weight:600;font-size:15px">${esc(p.name)}</span>
               <span class="mini-dot2" style="background:${p.running ? "var(--ok)" : "var(--text-3)"};box-shadow:${p.running ? "0 0 0 3px var(--ok-soft)" : "none"}"></span>
             </div>
-            ${p.domain ? `<span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3)">${esc(p.domain)}</span>` : ""}
+            ${p.url
+              ? `<a class="url-link" href="${esc(p.url)}" target="_blank" rel="noopener" style="font-family:var(--mono);font-size:11.5px" onclick="event.stopPropagation()">${esc(p.url.replace("https://", ""))} ↗</a>`
+              : p.domain ? `<span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3)">${esc(p.domain)}</span>` : ""}
           </div>
           <span class="src-badge" style="margin-left:auto">${t(p.source)}</span>
         </div>
@@ -1039,7 +1071,9 @@
               <span class="mini-dot2" style="background:${d.running ? "var(--ok)" : "var(--text-3)"};box-shadow:${d.running ? "0 0 0 3px var(--ok-soft)" : "none"}"></span>
               <span style="font-size:12.5px;color:${d.running ? "var(--ok)" : "var(--text-3)"}">${d.running ? t("onAir") : t("stopped")}</span>
             </div>
-            ${d.domain ? `<span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">${esc(d.domain)}</span>` : ""}
+            ${(() => { const u = d.custom_domain || d.auto_domain || d.domain; return u
+              ? `<a class="url-link" href="https://${esc(u)}" target="_blank" rel="noopener" style="font-family:var(--mono);font-size:12px">${esc(u)} ↗</a>`
+              : ""; })()}
           </div>
         </div>
         ${repo ? `<div class="repo-chip">
@@ -1075,6 +1109,7 @@
 
       <div class="detail-cols">
         <div style="display:flex;flex-direction:column;gap:16px">
+          ${domainsCard(d)}
           <div class="dcard">
             <div class="dcard-title"><span class="label">${t("liveContainers")}</span><span class="sub">${t("updatesEvery", 15)}</span></div>
             ${containers || `<div class="empty-note">—</div>`}
@@ -1116,8 +1151,97 @@
       $("view-projects").hidden = false;
       tickProjects();
     });
+    wireDomains(d);
     const delBtn = $("proj-delete");
     if (delBtn) delBtn.addEventListener("click", () => openDeleteModal(d));
+  }
+
+  function domainsCard(d) {
+    if (!d.domains_available && !d.auto_domain && !d.custom_domain) {
+      return `<div class="dcard">
+        <div class="dcard-title"><span class="label">${t("domains")}</span></div>
+        <div class="empty-note">${t("domUnavailable")}</div>
+      </div>`;
+    }
+    const row = (host, sub, badge, actions) => `
+      <div class="drow">
+        <div class="icon-sq" style="background:${hexSoft(badge === "live" ? "#3fca7c" : "#4f8bff", 0.14)}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${badge === "live" ? "var(--ok)" : "var(--accent)"}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12 L21 12"></path><path d="M12 3c2.5 2.4 3.8 5.6 3.8 9S14.5 18.6 12 21c-2.5-2.4-3.8-5.6-3.8-9S9.5 5.4 12 3Z"></path></svg>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <a class="url-link" href="https://${esc(host)}" target="_blank" rel="noopener" style="font-family:var(--mono);font-size:13px;font-weight:500">${esc(host)}</a>
+            ${badge === "live" ? `<span class="mono-badge" style="color:var(--ok);background:var(--ok-soft)">${t("domLive")}</span>` : ""}
+          </div>
+          <span class="sub">${sub}</span>
+        </div>
+        ${actions}
+      </div>`;
+    const rows = [];
+    if (d.custom_domain) {
+      rows.push(row(d.custom_domain, `${t("domOwn")} · ${t("domManaged")}`, "live",
+        `<button class="btn-sm" id="dom-disconnect">${t("domDisconnect")}</button>`));
+    }
+    if (d.auto_domain) {
+      rows.push(row(d.auto_domain, t("domAuto"), d.custom_domain ? "" : "live",
+        `<button class="btn-sm" data-copy="https://${esc(d.auto_domain)}">${t("domCopy")}</button>`));
+    }
+    return `<div class="dcard">
+      <div class="dcard-title"><span class="label">${t("domains")}</span><span class="sub">${t("domViaTunnel")}</span></div>
+      ${rows.join("") || `<div class="empty-note">—</div>`}
+      ${d.custom_domain ? "" : `
+      <div style="display:flex;flex-direction:column;gap:12px;padding:16px 20px;border-top:1px solid var(--stroke)">
+        <span class="label">${t("domConnectTitle")}</span>
+        <div style="display:flex;gap:10px">
+          <input class="dom-input" id="dom-input" placeholder="${t("domPh")}" autocomplete="off" spellcheck="false">
+          <button class="btn-primary" id="dom-connect">${t("domConnect")}</button>
+        </div>
+        <span class="sub" id="dom-msg" hidden></span>
+      </div>`}
+    </div>`;
+  }
+
+  function wireDomains(d) {
+    document.querySelectorAll("[data-copy]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = t("domCopied"); } catch {}
+      });
+    });
+    const connect = $("dom-connect");
+    if (connect) connect.addEventListener("click", async () => {
+      const input = $("dom-input");
+      const msg = $("dom-msg");
+      const value = input.value.trim();
+      if (!value) return;
+      connect.disabled = true;
+      try {
+        const res = await fetch(`/api/v1/projects/${encodeURIComponent(d.slug)}/domain`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ domain: value }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || res.status);
+        if (data.dns_managed === false) {
+          msg.hidden = false;
+          msg.innerHTML = t("domCname", `<b style="font-family:var(--mono);color:var(--text)">${esc(data.cname_target)}</b>`);
+        }
+        tickProjects();
+      } catch (e) {
+        msg.hidden = false;
+        msg.style.color = "var(--danger)";
+        msg.textContent = t("domFail", e.message || "?");
+      }
+      connect.disabled = false;
+    });
+    const disc = $("dom-disconnect");
+    if (disc) disc.addEventListener("click", async () => {
+      disc.disabled = true;
+      try {
+        await fetch(`/api/v1/projects/${encodeURIComponent(d.slug)}/domain`, { method: "DELETE" });
+        tickProjects();
+      } catch {}
+    });
   }
 
   function openDeleteModal(d) {
@@ -1493,6 +1617,7 @@
             <div class="dcard-title"><span class="label">${t("wizLive")}</span><span class="sub">${t("wizEvery")}</span></div>
             ${progRow("done", t("wizStepCommit"), `${t("filesN", (prov.files || []).length)} · ${esc((prov.commit_sha || "").slice(0, 7))}`)}
             ${progRow(secretsAll ? "done" : "fail", t("wizStepSecrets"), esc(secretsSub))}
+            ${prov.auto_domain ? progRow("done", t("domReserved"), esc(prov.auto_domain)) : ""}
             ${progRow(buildState, t("wizStepBuild"), buildSub)}
             ${progRow(serverState, t("wizStepServer"), "webo-deploy · pull + compose up")}
             ${progRow(upState, t("wizStepUp"), t("wizStepUpSub"))}

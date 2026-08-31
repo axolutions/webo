@@ -30,8 +30,18 @@ pub fn random_label(rand: &mut impl FnMut() -> u64) -> String {
 pub fn random_label_os() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // A fresh hasher with no input returns the same value every time, so feed
+    // it a counter and the clock — otherwise every word comes out identical.
     let state = RandomState::new();
-    let mut next = || state.build_hasher().finish();
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64;
+    let mut i = 0u64;
+    let mut next = || {
+        i += 1;
+        let mut h = state.build_hasher();
+        h.write_u64(nanos.wrapping_add(i.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
+        h.finish()
+    };
     random_label(&mut next)
 }
 
@@ -226,6 +236,15 @@ mod tests {
         let a = random_label_os();
         assert_eq!(a.split('-').count(), 3);
         assert!(valid_hostname(&format!("{a}.example.com")));
+        // the three words must not be the same word repeated, and two labels
+        // in a row must differ — both were real bugs
+        let mixed = (0..12).map(|_| random_label_os()).any(|l| {
+            let w: Vec<&str> = l.split('-').collect();
+            w[0] != w[1] || w[1] != w[2]
+        });
+        assert!(mixed, "words inside a label must vary");
+        let many: std::collections::HashSet<String> = (0..12).map(|_| random_label_os()).collect();
+        assert!(many.len() > 1, "labels must vary between calls");
     }
 
     #[test]

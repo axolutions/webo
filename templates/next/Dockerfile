@@ -6,7 +6,10 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 COPY . .
-ENV NEXT_TELEMETRY_DISABLED=1
+# NEXT_PRIVATE_STANDALONE forces the standalone build without touching the
+# app's next.config; when the Next version ignores it, the full build below
+# still ships (bigger image, same behaviour).
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_PRIVATE_STANDALONE=true
 RUN npm run build
 RUN set -e; \
     mkdir -p /out; \

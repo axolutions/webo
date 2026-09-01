@@ -71,7 +71,13 @@ pub struct QueryResult {
 
 /// Splits psql/sqlite pipe-separated output into columns and rows.
 pub fn parse_table_output(out: &str, limit: usize) -> QueryResult {
-    let mut lines = out.lines().filter(|l| !l.trim().is_empty());
+    // psql prints "(3 rows)" after the data unless footers are off; a stray
+    // footer must never become a column header or a row
+    let is_footer = |l: &str| {
+        let t = l.trim();
+        t.starts_with('(') && t.ends_with(')') && t.contains("row")
+    };
+    let mut lines = out.lines().filter(|l| !l.trim().is_empty() && !is_footer(l));
     let columns: Vec<String> = lines
         .next()
         .map(|h| h.split('|').map(|c| c.trim().to_string()).collect())
@@ -262,7 +268,7 @@ pub async fn pg_query(db: &Database, network: &str, sql: &str, write: bool) -> R
     // read-only goes through PGOPTIONS: putting a SET in the script would
     // make psql echo "SET" as the first output line, breaking the header
     let script = format!(
-        "PGPASSWORD='{pass}' psql -h {container} -U {user} -d {name} -A -F'|' -v ON_ERROR_STOP=1 <<'WEBOSQL'\n{sql}\nWEBOSQL"
+        "PGPASSWORD='{pass}' psql -h {container} -U {user} -d {name} -A -F'|' -P footer=off -v ON_ERROR_STOP=1 <<'WEBOSQL'\n{sql}\nWEBOSQL"
     );
     run_helper(
         &docker,
@@ -640,5 +646,13 @@ mod tests {
 
         let empty = parse_table_output("", 10);
         assert!(empty.columns.is_empty() && empty.rows.is_empty());
+
+        // a psql footer is never data
+        let with_footer = "name\nusers\n(1 row)\n";
+        let r = parse_table_output(with_footer, 10);
+        assert_eq!(r.columns, vec!["name"]);
+        assert_eq!(r.rows, vec![vec!["users"]]);
+        let only_footer = parse_table_output("name\n(0 rows)\n", 10);
+        assert!(only_footer.rows.is_empty(), "an empty result has no phantom row");
     }
 }

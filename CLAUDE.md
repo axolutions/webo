@@ -5,6 +5,14 @@ scanning), vanilla front embedded via `include_str!`, versioned JSON API
 (`/api/v1/*`) that is the single contract for the UI and for future MCP/
 automation consumers. Open-source project (MIT).
 
+## Design system — ALWAYS
+
+- **Any UI change follows `DESIGN.md`** — tokens, typography, and the
+  component vocabulary. Reuse existing classes; never invent parallel ones.
+- New UI ships in three layers together: markup + load call, i18n strings
+  in both dictionaries, and CSS for every class used.
+- A new component or token must be added to `DESIGN.md` in the same PR.
+
 ## I18N — ALWAYS
 
 - **Every user-facing string goes through i18n. No hardcoded UI copy.**

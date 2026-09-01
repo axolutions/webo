@@ -539,28 +539,15 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-/// Writes the project's variables into ~/apps/<slug>/.env on the server, which
-/// the compose files already read through `env_file`.
+/// Writes the project's variables into <apps dir>/<app>/.env on the SERVER.
+/// webo runs in a container, so `~` here would be the container's own home —
+/// the file is written through a helper container binding the host directory.
 async fn materialize_env(api: &Api, slug: &str) -> Result<(), String> {
     let Ok(Some(p)) = api.store.project_by_slug(slug) else { return Err("project not found".into()) };
     let vars = api.store.env_vars(p.id).map_err(|e| e.to_string())?;
     let body: String = vars.iter().map(|v| format!("{}={}\n", v.key, v.value)).collect();
     let app = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
-    tokio::task::spawn_blocking(move || {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(format!("mkdir -p ~/apps/{app} && cat > ~/apps/{app}/.env"))
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        child.stdin.as_mut().ok_or("no stdin")?.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
-        child.wait().map_err(|e| e.to_string())?;
-        Ok::<_, String>(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    db::write_app_env(&app, &body).await
 }
 
 async fn database_get(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {

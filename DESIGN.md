@@ -35,27 +35,27 @@ Defined on `:root` (dark, the default) and overridden on
 through a token.** The only exceptions currently in the file are the danger
 soft backgrounds (`rgba(229,72,77,…)`) which pair with `--danger`.
 
-| Token | Dark | Light | Use |
-|---|---|---|---|
-| `--accent` | `#4f8bff` | same | links, active states, focus rings, primary gradient start |
-| `--accent-2` | `#7c5cff` | same | primary gradient end (never alone) |
-| `--accent-soft` | `rgba(79,139,255,.16)` | `rgba(31,107,255,.12)` | soft blue chip/selection backgrounds |
-| `--page` | navy radial+linear gradient | pale blue gradient | `body` background only |
-| `--surface` | `rgba(255,255,255,.045)` | `rgba(255,255,255,.62)` | subtle fill: hover rows, inset boxes |
-| `--surface-2` | `rgba(255,255,255,.075)` | `rgba(255,255,255,.82)` | inputs, secondary buttons, chips |
-| `--surface-3` | `rgba(255,255,255,.11)` | `rgba(15,32,68,.06)` | track backgrounds, neutral pills, seg control |
-| `--card` | white 6%→3% vertical gradient | white 90%→72% | card backgrounds (with `--stroke` border + `--sh` shadow + blur) |
-| `--stroke` | `rgba(255,255,255,.085)` | `rgba(15,32,68,.09)` | default borders and row dividers |
-| `--stroke-strong` | `rgba(255,255,255,.2)` | `rgba(15,32,68,.2)` | hover borders, tooltip borders, modal border |
-| `--text` | `#eaf0fd` | `#0f1c33` | primary text |
-| `--text-2` | `#a2b4d4` | `#4c6183` | secondary text, most body copy |
-| `--text-3` | `#6f83a5` | `#7c8dab` | labels, captions, placeholders, icons at rest |
-| `--ok` | `#3fca7c` | same | "live/healthy" — dots, done steps |
-| `--ok-soft` | `rgba(63,202,124,.14)` | same | soft green backgrounds |
-| `--danger` | `#e5484d` | same | errors, destructive actions, write mode |
-| `--sh` | inset highlight + long soft drop | lighter pair | card shadow (always with `--card`) |
-| `--mono` | IBM Plex Mono stack | same | see typography |
-| `--spark-ring` | `#0a1226` | `#eef3fc` | halo behind sparkline endpoint dots |
+| Token             | Dark                             | Light                   | Use                                                              |
+| ----------------- | -------------------------------- | ----------------------- | ---------------------------------------------------------------- |
+| `--accent`        | `#4f8bff`                        | same                    | links, active states, focus rings, primary gradient start        |
+| `--accent-2`      | `#7c5cff`                        | same                    | primary gradient end (never alone)                               |
+| `--accent-soft`   | `rgba(79,139,255,.16)`           | `rgba(31,107,255,.12)`  | soft blue chip/selection backgrounds                             |
+| `--page`          | navy radial+linear gradient      | pale blue gradient      | `body` background only                                           |
+| `--surface`       | `rgba(255,255,255,.045)`         | `rgba(255,255,255,.62)` | subtle fill: hover rows, inset boxes                             |
+| `--surface-2`     | `rgba(255,255,255,.075)`         | `rgba(255,255,255,.82)` | inputs, secondary buttons, chips                                 |
+| `--surface-3`     | `rgba(255,255,255,.11)`          | `rgba(15,32,68,.06)`    | track backgrounds, neutral pills, seg control                    |
+| `--card`          | white 6%→3% vertical gradient    | white 90%→72%           | card backgrounds (with `--stroke` border + `--sh` shadow + blur) |
+| `--stroke`        | `rgba(255,255,255,.085)`         | `rgba(15,32,68,.09)`    | default borders and row dividers                                 |
+| `--stroke-strong` | `rgba(255,255,255,.2)`           | `rgba(15,32,68,.2)`     | hover borders, tooltip borders, modal border                     |
+| `--text`          | `#eaf0fd`                        | `#0f1c33`               | primary text                                                     |
+| `--text-2`        | `#a2b4d4`                        | `#4c6183`               | secondary text, most body copy                                   |
+| `--text-3`        | `#6f83a5`                        | `#7c8dab`               | labels, captions, placeholders, icons at rest                    |
+| `--ok`            | `#3fca7c`                        | same                    | "live/healthy" — dots, done steps                                |
+| `--ok-soft`       | `rgba(63,202,124,.14)`           | same                    | soft green backgrounds                                           |
+| `--danger`        | `#e5484d`                        | same                    | errors, destructive actions, write mode                          |
+| `--sh`            | inset highlight + long soft drop | lighter pair            | card shadow (always with `--card`)                               |
+| `--mono`          | IBM Plex Mono stack              | same                    | see typography                                                   |
+| `--spark-ring`    | `#0a1226`                        | `#eef3fc`               | halo behind sparkline endpoint dots                              |
 
 Semantic colors are reserved: green = alive/success, red = error/destructive,
 amber (`rgba(234,179,8,…)`, used inline in `.warn-strip` and the browser
@@ -73,16 +73,16 @@ Two faces, loaded from Google Fonts:
 
 Scale (there is no h1–h6; hierarchy is size + weight + color):
 
-| Role | Spec |
-|---|---|
-| Hero number | 36px / 700 / `-0.02em` / `tabular-nums` (30px in tiles and on mobile) |
-| Hero unit | 15–17px / 600 / `--text-3` |
-| Brand / page title | 20px / 700 / `-0.02em` |
-| Body / rows | 13–13.5px / 400–600 |
-| Base | 14px on `body` |
-| Section label | 11px / 600 / `letter-spacing: .09em` / UPPERCASE / `--text-3` (class `.label`) |
-| Badges & pills | 10.5px / 600 |
-| Log/mono lines | 11.5–12.5px mono |
+| Role               | Spec                                                                           |
+| ------------------ | ------------------------------------------------------------------------------ |
+| Hero number        | 36px / 700 / `-0.02em` / `tabular-nums` (30px in tiles and on mobile)          |
+| Hero unit          | 15–17px / 600 / `--text-3`                                                     |
+| Brand / page title | 20px / 700 / `-0.02em`                                                         |
+| Body / rows        | 13–13.5px / 400–600                                                            |
+| Base               | 14px on `body`                                                                 |
+| Section label      | 11px / 600 / `letter-spacing: .09em` / UPPERCASE / `--text-3` (class `.label`) |
+| Badges & pills     | 10.5px / 600                                                                   |
+| Log/mono lines     | 11.5–12.5px mono                                                               |
 
 Numbers that update or align vertically always get
 `font-variant-numeric: tabular-nums`.
@@ -107,6 +107,7 @@ Numbers that update or align vertically always get
 Reuse these. Class names are the API.
 
 ### Cards
+
 - `.stat-card` — overview stat: `.card-head` (`.label` + side info) →
   `.hero-row` (`.hero` + `.hero-unit` + `.hero-side`) → visualization →
   `.sub` caption.
@@ -118,7 +119,9 @@ Reuse these. Class names are the API.
 - `.danger-card` — `.dcard` variant with red border for destructive areas.
 
 ### Rows (all: flex, gap ~13px, `padding: 12–13px 20px`, top border, first
+
 child borderless)
+
 - `.drow` generic · `.res-row` resource · `.kv-row` env var (mono key/value)
   · `.wrow` wizard repo (`.pick` clickable, `.sel` selected with inset accent
   bar, `.dim` 45% opacity) · `.issue-row` error group (with `.issue-count`
@@ -127,6 +130,7 @@ child borderless)
   `.proc-grid` process table row.
 
 ### Buttons
+
 - `.btn-primary` — 40px, accent gradient, white text, glow shadow. One
   primary action per view.
 - `.btn-ghost` — 40px, `--surface-2` + stroke. Secondary.
@@ -139,6 +143,7 @@ child borderless)
   interactive element must keep a visible focus state.
 
 ### Badges & chips (pills, 10.5px/600 unless noted)
+
 - `.pill` / `.src-badge` / `.procs-badge` — neutral on `--surface-3`.
 - `.role-badge` — colored per role, soft background of the same hue.
 - `.err-badge` — red count of open errors.
@@ -149,6 +154,7 @@ child borderless)
 - `.step-chip` — wizard steps: `.on` accent, `.done` green.
 
 ### Inputs
+
 - `.search-box` — 38px, focus ring `0 0 0 4px var(--accent-soft)`.
 - `.dom-input` / `.del-input` — 40px mono inputs; same accent focus ring
   (del-input rings red).
@@ -157,6 +163,7 @@ child borderless)
   is always visually red.
 
 ### Data displays
+
 - `.bar-track`/`.bar-fill` — 8px progress, accent gradient fill, optional
   `.bar-cap` limit marker; `.mini-track`/`.mini-fill` — 5px inline version.
 - `.spark` — 56px-tall interactive SVG sparkline; hover shows `.spark-tip`
@@ -166,6 +173,7 @@ child borderless)
 - `.snippet-box` — mono copy-paste box, capped height, scrolls.
 
 ### Overlays
+
 - `.modal-overlay` (fixed, blurred dark) + `.modal-card` (460px,
   `--stroke-strong` border). Destructive modals: checkboxes with red accent,
   type-to-confirm `.del-input`, `.btn-ghost` cancel + `.btn-danger.solid`

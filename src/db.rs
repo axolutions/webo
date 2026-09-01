@@ -399,9 +399,11 @@ pub async fn write_app_env(app: &str, body: &str) -> Result<(), String> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(body)
     };
+    // compose resolves `env_file` relative to the compose file, which lives in
+    // <app>/deploy — a .env one level up is silently ignored.
     // base64 keeps quotes, newlines and specials intact through the shell
     let script = format!(
-        "mkdir -p /apps/{app} && echo '{encoded}' | base64 -d > /apps/{app}/.env && echo WEBO_ENV_OK"
+        "mkdir -p /apps/{app}/deploy && echo '{encoded}' | base64 -d > /apps/{app}/deploy/.env && echo WEBO_ENV_OK"
     );
     let out = run_helper(
         &docker,
@@ -458,7 +460,8 @@ mod tests {
         // values with quotes and specials must survive the trip
         let body = "DATABASE_URL=postgres://u:p@h:5432/d\nQUOTED=\"hi there\"\n";
         write_app_env("myapp", body).await.expect("written");
-        let written = std::fs::read_to_string(dir.join("myapp/.env")).expect("file on the host");
+        // next to the compose files, where `env_file: .env` actually resolves
+        let written = std::fs::read_to_string(dir.join("myapp/deploy/.env")).expect("file on the host");
         assert_eq!(written, body);
 
         assert!(write_app_env("../escape", body).await.is_err(), "path traversal refused");

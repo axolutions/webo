@@ -1068,7 +1068,7 @@
               ? `<a class="url-link" href="${esc(p.url)}" target="_blank" rel="noopener" style="font-family:var(--mono);font-size:11.5px" onclick="event.stopPropagation()">${esc(p.url.replace("https://", ""))} ↗</a>`
               : p.domain ? `<span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3)">${esc(p.domain)}</span>` : ""}
           </div>
-          <span class="src-badge" style="margin-left:auto">${t(p.source)}</span>
+          ${p.open_errors ? `<span class="err-badge" style="margin-left:auto">${t("errBadge", p.open_errors)}</span><span class="src-badge">${t(p.source)}</span>` : `<span class="src-badge" style="margin-left:auto">${t(p.source)}</span>`}
         </div>
         <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-2)">${repo}</div>
         <div class="proj-stats">
@@ -1297,6 +1297,7 @@
           </div>` : ""}
         </div>
       </div>
+      <div class="dcard" id="errors-card" style="margin-top:16px"></div>
       <div class="dcard" id="logs-card" style="margin-top:16px"></div>
       <div class="dcard" id="data-card" style="margin-top:16px" hidden></div>`;
     $("proj-back").addEventListener("click", () => {
@@ -1326,6 +1327,8 @@
       b.addEventListener("click", () => {
         logState.container = b.dataset.logs;
         loadLogs(d.slug);
+      errState = { issues: [], snippet: "", open: null, events: [], loadedFor: null };
+      loadErrors(d.slug);
         $("logs-card")?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
     });
@@ -1339,6 +1342,7 @@
       renderDatabaseCard(d.slug);
       renderDataTab(d.slug);
       renderLogs(d.slug);
+      renderErrors(d.slug);
       // the card is rebuilt on every refresh: repaint it from what we have,
       // otherwise it sits on the loading placeholder forever
       if (dbState.env) renderEnvCard(d.slug, dbState.env); else loadEnv(d.slug);
@@ -1663,6 +1667,80 @@
       try { renderResult(await runSql(slug, dbState.sql, dbState.write)); }
       catch (e) { $("sql-result").innerHTML = `<div class="empty-note" style="color:var(--danger)">${t("dataError", esc(e.message))}</div>`; }
       $("sql-run").disabled = false;
+    });
+  }
+
+  // ---------- errors ----------
+  let errState = { issues: [], snippet: "", open: null, events: [], loadedFor: null };
+
+  async function loadErrors(slug) {
+    try {
+      const r = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/errors`)).json();
+      errState.issues = r.issues || [];
+      errState.snippet = r.snippet || "";
+      errState.loadedFor = slug;
+    } catch { errState.issues = []; }
+    renderErrors(slug);
+  }
+
+  function renderErrors(slug) {
+    const card = $("errors-card");
+    if (!card) return;
+    const when = (ts) => t("agoW", relTime(nowSecs() - ts));
+    const rows = errState.issues.map((i) => `
+      <div>
+        <div class="issue-row" data-issue="${i.id}">
+          <span class="issue-count">${t("errCount", i.count)}</span>
+          <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
+            <span style="font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(i.title)}</span>
+            <span class="sub">${t("errFirst")} ${when(i.first_seen)} · ${t("errLast")} ${when(i.last_seen)}</span>
+          </div>
+          <span class="role-badge" style="color:${i.source === "browser" ? "#eab308" : "var(--accent)"};background:${hexSoft(i.source === "browser" ? "#eab308" : "#4f8bff", 0.14)}">${i.source === "browser" ? t("errBrowser") : t("errServer")}</span>
+          <button class="btn-sm" data-resolve="${i.id}">${t("errResolve")}</button>
+        </div>
+        ${errState.open === i.id ? `<div class="issue-events">${(errState.events || []).map((e) => `
+          <div class="log-line">
+            <span class="log-ts">${new Date(e.ts * 1000).toLocaleString(LOCALE, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
+            <span class="log-src">${esc(e.origin)}</span>
+            <span class="log-txt">${esc(e.message)}</span>
+          </div>`).join("") || `<div class="empty-note">—</div>`}</div>` : ""}
+      </div>`).join("");
+    card.innerHTML = `
+      <div class="dcard-title"><span class="label">${t("errors")}</span><span class="sub">${errState.issues.length ? t("errOccurrences") : ""}</span></div>
+      ${rows || `<div class="empty-note">${t("errNone")}</div>`}
+      <div style="display:flex;flex-direction:column;gap:8px;padding:16px 20px;border-top:1px solid var(--stroke)">
+        <span class="label">${t("errSnippet")}</span>
+        <span class="sub">${t("errSnippetHelp")}</span>
+        <div class="snippet-box">${esc(errState.snippet)}</div>
+        <button class="btn-sm" id="err-copy" style="width:fit-content">${t("errCopy")}</button>
+      </div>`;
+    card.querySelectorAll("[data-issue]").forEach((row) => {
+      row.addEventListener("click", async (ev) => {
+        if (ev.target.closest("[data-resolve]")) return;
+        const id = Number(row.dataset.issue);
+        if (errState.open === id) { errState.open = null; renderErrors(slug); return; }
+        try {
+          const r = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/errors/${id}`)).json();
+          errState.open = id;
+          errState.events = r.events || [];
+        } catch {}
+        renderErrors(slug);
+      });
+    });
+    card.querySelectorAll("[data-resolve]").forEach((b) => {
+      b.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/errors/${b.dataset.resolve}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ resolved: true }),
+        });
+        loadErrors(slug);
+      });
+    });
+    const copy = $("err-copy");
+    if (copy) copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(errState.snippet); copy.textContent = t("errCopied"); } catch {}
     });
   }
 

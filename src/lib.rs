@@ -1,6 +1,7 @@
 pub mod cloudflare;
 pub mod collector;
 pub mod db;
+pub mod errors;
 pub mod logs;
 pub mod metrics;
 pub mod projects;

@@ -246,6 +246,58 @@ mod tests {
         assert_eq!(error_blocks(&mixed)[0].1.lines().count(), 1);
     }
 
+    /// The whole collection loop against a real container: lines land in the
+    /// index, an error (with its stack) becomes an issue, and a second pass
+    /// does not duplicate anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_collects_indexes_and_tracks_errors() {
+        let available = std::process::Command::new("docker")
+            .args(["info"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !available {
+            eprintln!("docker unavailable — skipping live collection test");
+            return;
+        }
+        let name = format!("webo-collect-{}", std::process::id());
+        let ok = std::process::Command::new("docker")
+            .args([
+                "run", "-d", "--name", &name,
+                "--label", "com.docker.compose.project=webo-collect-proj",
+                "alpine:3", "sh", "-c",
+                "echo boot ok; echo 'Error: exploded' >&2; echo '    at handler (app.js:1:2)' >&2; sleep 60",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "container started");
+
+        let store = Arc::new(crate::store::Store::open_in_memory().unwrap());
+        store.upsert_discovered("webo-collect-proj", "webo-collect-proj", None, None, 1).unwrap();
+        let id = store.project_by_slug("webo-collect-proj").unwrap().unwrap().id;
+        let handle = tokio::spawn(run(store.clone(), 1));
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if !store.search_logs(id, None, None, None, 10).unwrap().is_empty() {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1500)).await; // one more pass: dedupe path
+        handle.abort();
+        let _ = std::process::Command::new("docker").args(["rm", "-f", &name]).output();
+
+        let lines = store.search_logs(id, None, None, None, 50).unwrap();
+        assert!(lines.iter().any(|l| l.line.contains("boot ok")), "stdout indexed: {lines:?}");
+        let boots = lines.iter().filter(|l| l.line.contains("boot ok")).count();
+        assert_eq!(boots, 1, "a re-read never stores the same line twice");
+        let issues = store.issues(id, Some("open")).unwrap();
+        assert_eq!(issues.len(), 1, "the error line became one issue: {issues:?}");
+        assert_eq!(issues[0].culprit.as_deref(), Some("app.js:1:2"), "stack frame blamed");
+        let events = store.issue_events(issues[0].id, 5).unwrap();
+        assert!(events[0].message.contains("at handler"), "stack travels with the occurrence");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn tail_reads_a_real_container() {
         let available = std::process::Command::new("docker")

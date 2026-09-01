@@ -125,18 +125,35 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
             })
             .unwrap_or_default();
 
-        // volume sizes are expensive (docker df): refresh every ~10 ticks
+        // volume sizes are expensive (docker df): refresh every ~10 ticks,
+        // and the same pass feeds the machine-wide Docker card
         if ticks % 10 == 1 {
             if let Ok(df) = docker.df().await {
+                let mut info = crate::metrics::DockerInfo::default();
+                for i in df.images.unwrap_or_default() {
+                    info.images += 1;
+                    let size = i.size.max(0) as u64;
+                    info.images_bytes += size;
+                    if i.containers == 0 {
+                        info.reclaimable_bytes += size;
+                    }
+                }
                 volume_sizes = df
                     .volumes
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|v| {
                         let size = v.usage_data.as_ref().map(|u| u.size.max(0) as u64)?;
+                        let refs = v.usage_data.as_ref().map(|u| u.ref_count).unwrap_or(0);
+                        info.volumes += 1;
+                        info.volumes_bytes += size;
+                        if refs == 0 {
+                            info.reclaimable_bytes += size;
+                        }
                         Some((v.name, size))
                     })
                     .collect();
+                state.write().await.docker = info;
             }
         }
 
@@ -191,14 +208,16 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 prev.insert(id.clone(), PrevStat { cpu_total, system_total, blkio_total });
             }
 
-            // uptime via inspect (cheap for a handful of containers)
-            let uptime_secs = match docker.inspect_container(&id, None).await {
-                Ok(info) => info
-                    .state
-                    .and_then(|st| st.started_at)
-                    .map(|t| uptime_from_rfc3339(&t, now))
-                    .unwrap_or(0),
-                Err(_) => 0,
+            // uptime + restart count via inspect (cheap for a handful)
+            let (uptime_secs, restarts) = match docker.inspect_container(&id, None).await {
+                Ok(info) => (
+                    info.state
+                        .and_then(|st| st.started_at)
+                        .map(|t| uptime_from_rfc3339(&t, now))
+                        .unwrap_or(0),
+                    info.restart_count.unwrap_or(0),
+                ),
+                Err(_) => (0, 0),
             };
 
             let entry = groups.entry(slug.clone()).or_default();
@@ -231,6 +250,7 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 role,
                 image: image.clone(),
                 state: c.state.clone().unwrap_or_else(|| "unknown".into()),
+                restarts,
                 uptime_secs,
                 cpu_pct,
                 mem_bytes,

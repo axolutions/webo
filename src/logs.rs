@@ -27,6 +27,29 @@ pub fn parse_line(raw: &str) -> Option<(i64, String)> {
     Some((ts, rest.to_string()))
 }
 
+/// Pairs each error line with the stack frames that follow it, so the stored
+/// occurrence carries the whole story — the panel shows a real stack trace,
+/// not a lonely first line.
+pub fn error_blocks(lines: &[crate::store::LogLine]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if !crate::errors::looks_like_error(&l.line, &l.stream) {
+            continue;
+        }
+        let mut message = l.line.clone();
+        for follow in lines.iter().skip(i + 1).take(12) {
+            if follow.container == l.container && crate::errors::is_stack_frame(&follow.line) {
+                message.push('\n');
+                message.push_str(&follow.line);
+            } else {
+                break;
+            }
+        }
+        out.push((i, message));
+    }
+    out
+}
+
 /// Lines newer than `since`, so a re-read never stores the same line twice.
 pub fn newer_than(lines: Vec<(i64, String, String)>, since: Option<i64>) -> Vec<(i64, String, String)> {
     match since {
@@ -138,23 +161,24 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     .collect();
                 let _ = store.insert_logs(p.id, &lines);
                 // the same lines feed error tracking, so every app gets it
-                // without installing anything
-                for l in &lines {
-                    if crate::errors::looks_like_error(&l.line, &l.stream) {
-                        // fingerprint the cleaned title, not the raw line: the
-                        // same bug logged by the app and by the framework must
-                        // land on one issue
-                        let title = crate::errors::title_of(&l.line);
-                        let _ = store.record_error(
-                            p.id,
-                            &crate::errors::fingerprint(&title),
-                            &title,
-                            "server",
-                            &l.container,
-                            &l.line,
-                            l.ts,
-                        );
-                    }
+                // without installing anything; the stack frames that follow an
+                // error travel with it as one occurrence
+                for (i, message) in error_blocks(&lines) {
+                    let l = &lines[i];
+                    // fingerprint the cleaned title, not the raw line: the
+                    // same bug logged by the app and by the framework must
+                    // land on one issue
+                    let title = crate::errors::title_of(&l.line);
+                    let _ = store.record_error(
+                        p.id,
+                        &crate::errors::fingerprint(&title),
+                        &title,
+                        "server",
+                        &l.container,
+                        &message,
+                        l.ts,
+                        crate::errors::culprit_of(&message).as_deref(),
+                    );
                 }
             }
             let _ = store.prune_logs(p.id, MAX_BYTES_PER_PROJECT);
@@ -189,6 +213,37 @@ mod tests {
         assert_eq!(fresh.len(), 1, "the line at the boundary was already stored");
         assert_eq!(fresh[0].2, "new");
         assert_eq!(newer_than(lines, None).len(), 3, "a first read takes everything");
+    }
+
+    #[test]
+    fn stacks_travel_with_their_error() {
+        let mk = |ts: i64, c: &str, line: &str| crate::store::LogLine {
+            ts, container: c.into(), stream: "stderr".into(), line: line.into(),
+        };
+        let lines = vec![
+            mk(1, "app", "GET / 200"),
+            mk(2, "app", "TypeError: Cannot read properties of null (reading 'valor')"),
+            mk(2, "app", "    at w (.next/server/app/api/quebra/route.js:1:823)"),
+            mk(2, "app", "    at async POST (route.js:31:5)"),
+            mk(3, "app", "next line of ordinary output"),
+            mk(4, "db", "ERROR:  syntax error at or near \"1\""),
+        ];
+        let blocks = error_blocks(&lines);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].0, 1);
+        assert!(blocks[0].1.contains("route.js:1:823"), "stack attached");
+        assert!(!blocks[0].1.contains("ordinary output"), "capture stops at normal lines");
+        assert_eq!(blocks[1].1.lines().count(), 1, "error without stack stays one line");
+        assert_eq!(
+            crate::errors::culprit_of(&blocks[0].1).as_deref(),
+            Some(".next/server/app/api/quebra/route.js:1:823")
+        );
+        // a frame from ANOTHER container never glues onto this error
+        let mixed = vec![
+            mk(1, "app", "Error: boom"),
+            mk(1, "db", "    at other (x.js:1:1)"),
+        ];
+        assert_eq!(error_blocks(&mixed)[0].1.lines().count(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -4,6 +4,7 @@ pub mod db;
 pub mod errors;
 pub mod logs;
 pub mod metrics;
+pub mod persist;
 pub mod projects;
 pub mod scaffold;
 pub mod server;

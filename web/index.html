@@ -285,6 +285,13 @@
   .log-txt { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
   .log-err .log-txt { color: var(--danger); }
   .log-scroll { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; }
+  .issue-row { display: flex; align-items: center; gap: 13px; padding: 12px 20px; border-top: 1px solid var(--stroke); cursor: pointer; }
+  .issue-row:first-of-type { border-top: 0; }
+  .issue-row:hover { background: var(--surface); }
+  .issue-count { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text-2); background: var(--surface-3); border-radius: 8px; padding: 3px 8px; min-width: 38px; text-align: center; flex: none; font-variant-numeric: tabular-nums; }
+  .issue-events { border-top: 1px solid var(--stroke); background: var(--surface); max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
+  .err-badge { font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; color: var(--danger); background: rgba(229,72,77,0.14); }
+  .snippet-box { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--text-2); background: var(--surface); border: 1px solid var(--stroke); border-radius: 11px; padding: 12px 14px; max-height: 150px; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; word-break: break-all; }
   .res-row { display: flex; align-items: center; gap: 13px; padding: 13px 20px; border-top: 1px solid var(--stroke); }
   .res-row:first-of-type { border-top: 0; }
   .role-badge { font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }

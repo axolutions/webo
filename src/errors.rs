@@ -136,7 +136,9 @@ impl BrowserReport {
 /// errors, rejected promises and failed resources.
 pub fn snippet(base_url: &str, key: &str) -> String {
     format!(
-        r#"<script>(function(){{var u="{base_url}/api/v1/ingest/{key}";function s(m,k,st){{try{{navigator.sendBeacon?navigator.sendBeacon(u,new Blob([JSON.stringify({{message:m,kind:k,stack:st,url:location.href}})],{{type:"application/json"}})):fetch(u,{{method:"POST",headers:{{"content-type":"application/json"}},body:JSON.stringify({{message:m,kind:k,stack:st,url:location.href}}),keepalive:true}})}}catch(e){{}}}}
+        // text/plain keeps it a CORS-simple request: application/json would
+        // demand a preflight, and sendBeacon cannot preflight — it just fails
+        r#"<script>(function(){{var u="{base_url}/api/v1/ingest/{key}";function s(m,k,st){{try{{var b=JSON.stringify({{message:m,kind:k,stack:st,url:location.href}});navigator.sendBeacon?navigator.sendBeacon(u,new Blob([b],{{type:"text/plain;charset=UTF-8"}})):fetch(u,{{method:"POST",headers:{{"content-type":"text/plain;charset=UTF-8"}},body:b,keepalive:true}})}}catch(e){{}}}}
 window.addEventListener("error",function(e){{e.error?s(String(e.error.message||e.message),"error",e.error.stack):s("failed to load "+((e.target&&(e.target.src||e.target.href))||"resource"),"resource")}},true);
 window.addEventListener("unhandledrejection",function(e){{var r=e.reason||{{}};s(String(r.message||r),"unhandledrejection",r.stack)}});}})();</script>"#
     )
@@ -194,6 +196,18 @@ mod tests {
     }
 
     #[test]
+    fn the_same_bug_reported_in_two_formats_is_one_issue() {
+        // the app logs it with its own prefix; the framework logs its own line
+        let mine = "[webo-check] TypeError na rota /api/quebra: TypeError: Cannot read properties of null (reading 'valor')";
+        let framework = "TypeError: Cannot read properties of null (reading 'valor')";
+        assert_eq!(
+            fingerprint(&title_of(mine)),
+            fingerprint(&title_of(framework)),
+            "one bug, one issue"
+        );
+    }
+
+    #[test]
     fn browser_reports_become_events() {
         let r = BrowserReport {
             message: "x is not a function".into(),
@@ -214,6 +228,8 @@ mod tests {
         assert!(s.contains("https://webo.example.com/api/v1/ingest/abc123"));
         assert!(s.contains("unhandledrejection"));
         assert!(s.contains("sendBeacon"));
+        assert!(s.contains("text/plain"), "json would need a preflight a beacon cannot do");
+        assert!(!s.contains("application/json"));
         assert!(s.starts_with("<script>") && s.ends_with("</script>"));
     }
 }

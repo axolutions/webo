@@ -222,8 +222,13 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                         .sum::<u64>()
                 })
                 .unwrap_or(0);
+            let role = labels
+                .get("webo.role")
+                .cloned()
+                .unwrap_or_else(|| "app".to_string());
             entry.containers.push(ProjectContainer {
                 name,
+                role,
                 image: image.clone(),
                 state: c.state.clone().unwrap_or_else(|| "unknown".into()),
                 uptime_secs,
@@ -265,8 +270,24 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
             let sample = ProjectSample { ts: now, cpu_pct: live.cpu_pct, mem_bytes: live.mem_bytes };
             if let Some(old) = st.projects_live.remove(&slug) {
                 live.history = old.history;
+                live.container_history = old.container_history;
             }
             push_history(&mut live, sample);
+            // one series per resource, so each card has its own 24 h
+            let per_container: Vec<(String, ProjectSample)> = live
+                .containers
+                .iter()
+                .map(|c| (c.name.clone(), ProjectSample { ts: now, cpu_pct: c.cpu_pct, mem_bytes: c.mem_bytes }))
+                .collect();
+            for (name, sample) in per_container {
+                let series = live.container_history.entry(name).or_default();
+                if series.len() == HISTORY_CAP {
+                    series.pop_front();
+                }
+                series.push_back(sample);
+            }
+            let alive: Vec<String> = live.containers.iter().map(|c| c.name.clone()).collect();
+            live.container_history.retain(|name, _| alive.contains(name));
             st.projects_live.insert(slug, live);
         }
         st.projects_live.retain(|slug, _| group_meta.contains_key(slug));
@@ -474,6 +495,26 @@ mod tests {
         let gone = Command::new("docker").args(["inspect", &name]).output().unwrap();
         assert!(!gone.status.success(), "container removed");
         let _ = Command::new("docker").args(["rm", "-f", &name]).output();
+    }
+
+    #[test]
+    fn each_resource_keeps_its_own_series() {
+        // the project total and the per-resource series move together but
+        // stay independent — the panel draws one sparkline per card
+        let mut live = ProjectLive::default();
+        for i in 0..3u64 {
+            push_history(&mut live, ProjectSample { ts: i, cpu_pct: i as f32, mem_bytes: i * 10 });
+            for (name, cpu) in [("app", 1.0f32), ("db", 0.5)] {
+                let series = live.container_history.entry(name.to_string()).or_default();
+                series.push_back(ProjectSample { ts: i, cpu_pct: cpu, mem_bytes: 5 });
+            }
+        }
+        assert_eq!(live.history.len(), 3);
+        assert_eq!(live.container_history["app"].len(), 3);
+        assert_eq!(live.container_history["db"].back().unwrap().cpu_pct, 0.5);
+        // a resource that goes away leaves the map
+        live.container_history.retain(|n, _| n == "app");
+        assert!(!live.container_history.contains_key("db"));
     }
 
     #[test]

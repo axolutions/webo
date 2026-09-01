@@ -85,6 +85,8 @@ pub struct SystemInfo {
 #[derive(Clone, Serialize)]
 pub struct ProjectContainer {
     pub name: String,
+    /// What this container is to the project: "app", "database", ...
+    pub role: String,
     pub image: String,
     pub state: String,
     pub uptime_secs: u64,
@@ -109,7 +111,10 @@ pub struct ProjectLive {
     pub disk_bps: u64,
     pub image_bytes: u64,
     pub volume_bytes: u64,
+    /// 24 h for the project as a whole…
     pub history: VecDeque<ProjectSample>,
+    /// …and for each resource on its own.
+    pub container_history: std::collections::HashMap<String, VecDeque<ProjectSample>>,
 }
 
 pub struct State {

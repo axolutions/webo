@@ -269,6 +269,18 @@
   table.data th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); position: sticky; top: 0; background: var(--surface-2); }
   table.data td { font-family: var(--mono); color: var(--text-2); }
   .table-chip { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--surface-2); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .spark-host { position: relative; }
+  .spark-host svg { display: block; cursor: crosshair; }
+  .spark-tip {
+    position: absolute; pointer-events: none; z-index: 6; transform: translate(-50%, -120%);
+    background: var(--surface-2); border: 1px solid var(--stroke-strong); border-radius: 9px;
+    padding: 5px 9px; font-size: 11.5px; white-space: nowrap; color: var(--text);
+    box-shadow: 0 10px 24px -14px rgba(0,0,0,0.9);
+  }
+  .spark-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--stroke-strong); pointer-events: none; }
+  .res-row { display: flex; align-items: center; gap: 13px; padding: 13px 20px; border-top: 1px solid var(--stroke); }
+  .res-row:first-of-type { border-top: 0; }
+  .role-badge { font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
   .table-chip:hover, .table-chip.on { border-color: var(--accent); color: var(--text); }
   .cname-box { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; border-radius: 11px; background: var(--surface); border: 1px solid var(--stroke); }
   .btn-danger { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid rgba(229, 72, 77, 0.45); border-radius: 12px; background: rgba(229, 72, 77, 0.12); color: var(--danger); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
@@ -1056,6 +1068,53 @@
     return t("cpuBusy");
   }
 
+  // sparkline that answers "when was the peak?" on hover
+  function interactiveSpark(id, series, max, fmt) {
+    const host = $(id);
+    if (!host || !series.length) return;
+    const W = 300, H = 34, PAD = 5;
+    const top = max ?? Math.max(...series.map((p) => p.v), 1e-9);
+    const pts = series.map((p, i) => [
+      series.length === 1 ? W : (i / (series.length - 1)) * W,
+      H - PAD - Math.min(p.v / top, 1) * (H - 2 * PAD),
+    ]);
+    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+    const peak = series.reduce((a, b) => (b.v > a.v ? b : a), series[0]);
+    host.innerHTML = `
+      <svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="rgba(140,165,215,0.12)" stroke-width="1"></line>
+        <path d="${line} L${W},${H} L0,${H} Z" fill="rgba(79,139,255,0.16)"></path>
+        <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"></path>
+        <circle cx="${pts[pts.length - 1][0]}" cy="${pts[pts.length - 1][1]}" r="3" fill="var(--accent)" stroke="var(--spark-ring)" stroke-width="2"></circle>
+      </svg>
+      <div class="spark-cursor" hidden></div>
+      <div class="spark-tip" hidden></div>`;
+    const svg = host.querySelector("svg");
+    const tip = host.querySelector(".spark-tip");
+    const cur = host.querySelector(".spark-cursor");
+    const move = (ev) => {
+      const box = host.getBoundingClientRect();
+      const x = Math.max(0, Math.min(box.width, ev.clientX - box.left));
+      const i = Math.round((x / box.width) * (series.length - 1));
+      const p = series[i];
+      if (!p) return;
+      tip.hidden = false; cur.hidden = false;
+      cur.style.left = `${(i / Math.max(series.length - 1, 1)) * box.width}px`;
+      tip.style.left = cur.style.left;
+      tip.textContent = `${fmt(p.v)} · ${t("agoW", relTime(nowSecs() - p.ts))}`;
+    };
+    svg.addEventListener("mousemove", move);
+    svg.addEventListener("mouseleave", () => { tip.hidden = true; cur.hidden = true; });
+    host.dataset.peak = `${fmt(peak.v)} · ${t("agoW", relTime(nowSecs() - peak.ts))}`;
+  }
+
+  function seriesFrom(hist, field) {
+    return decimate((hist || []).map((h) => h[field]), 120).map((v, i, arr) => ({
+      v,
+      ts: (hist[Math.min(Math.round((i / Math.max(arr.length - 1, 1)) * (hist.length - 1)), hist.length - 1)] || {}).ts || 0,
+    }));
+  }
+
   function renderProjectDetail(d) {
     const hist = d.history || [];
     const cpuSeries = decimate(hist.map((x) => x.cpu_pct));
@@ -1063,17 +1122,26 @@
     const memTotal = machineMem || Math.max(...hist.map((x) => x.mem_bytes), 1) * 1.4;
     const total = (d.image_bytes || 0) + (d.volume_bytes || 0);
     const repo = d.repo_owner && d.repo_name ? `${d.repo_owner}/${d.repo_name}` : null;
-    const containers = (d.containers || []).map((c) => `
-      <div class="drow">
-        <span class="mini-dot2" style="background:${c.state === "running" ? "var(--ok)" : "var(--danger)"}"></span>
+    const roleColor = (role) => (role === "database" ? "#38bdf8" : "var(--accent)");
+    const containers = (d.containers || []).map((c, i) => `
+      <div class="res-row">
+        <div class="icon-sq" style="background:${hexSoft(c.role === "database" ? "#38bdf8" : "#4f8bff", 0.14)}">
+          ${c.role === "database"
+            ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>`
+            : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="8" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect></svg>`}
+        </div>
         <div style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1">
-          <span style="font-weight:600;font-size:13.5px">${esc(c.name)}</span>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:13.5px">${esc(c.name)}</span>
+            <span class="role-badge" style="color:${roleColor(c.role)};background:${hexSoft(c.role === "database" ? "#38bdf8" : "#4f8bff", 0.14)}">${c.role === "database" ? t("roleDatabase") : t("roleApp")}</span>
+            <span class="mini-dot2" style="background:${c.state === "running" ? "var(--ok)" : "var(--danger)"}"></span>
+          </div>
           <span style="font-family:var(--mono);font-size:11.5px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.image)} · ${t("agoW", relTime(c.uptime_secs))}</span>
         </div>
+        <div class="spark-host" id="spark-res-${i}" style="width:130px;flex:none"></div>
         <div style="display:flex;gap:18px;flex:none">
           <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${c.cpu_pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%</span><span class="sub">CPU</span></div>
           <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${fmtMem(c.mem_bytes)}</span><span class="sub">RAM</span></div>
-          <div style="display:flex;flex-direction:column;gap:2px;align-items:flex-end"><span class="cell-num">${fmtDisk(c.disk_bps)}</span><span class="sub">${t("disk")}</span></div>
         </div>
       </div>`).join("");
     const builds = (d.builds || []).map((b) => {
@@ -1129,13 +1197,13 @@
         <div class="tile">
           <span class="label">CPU</span>
           <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${d.cpu_pct.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}</span><span class="unit">%</span></div>
-          <svg width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none" style="display:block">${sparkSvgInner(cpuSeries, Math.max(...cpuSeries, 5), 300, 34)}</svg>
-          <span class="sub">${cpuMood(d.cpu_pct)}</span>
+          <div class="spark-host" id="spark-cpu-detail"></div>
+          <span class="sub">${cpuMood(d.cpu_pct)} · ${t("last24h2")}</span>
         </div>
         <div class="tile">
           <span class="label">${t("memory")}</span>
           <div style="display:flex;align-items:baseline;gap:5px"><span class="big">${fmtMem(d.mem_bytes).split(" ")[0]}</span><span class="unit">${fmtMem(d.mem_bytes).split(" ")[1]}</span></div>
-          <svg width="100%" height="34" viewBox="0 0 300 34" preserveAspectRatio="none" style="display:block">${sparkSvgInner(memSeries, Math.max(...memSeries, 1) * 1.4, 300, 34)}</svg>
+          <div class="spark-host" id="spark-mem-detail"></div>
           <span class="sub">${machineMem ? t("ofMachine", ((d.mem_bytes / machineMem) * 100).toLocaleString(LOCALE, { maximumFractionDigits: 1 })) : ""}</span>
         </div>
         <div class="tile">
@@ -1156,7 +1224,7 @@
           <div class="dcard" id="db-card"><div class="dcard-title"><span class="label">${t("dbTitle")}</span></div><div class="empty-note">…</div></div>
           <div class="dcard" id="env-card"><div class="dcard-title"><span class="label">${t("envTitle")}</span></div><div class="empty-note">…</div></div>
           <div class="dcard">
-            <div class="dcard-title"><span class="label">${t("liveContainers")}</span><span class="sub">${t("updatesEvery", 15)}</span></div>
+            <div class="dcard-title"><span class="label">${t("resources")}</span><span class="sub">${t("updatesEvery", 15)}</span></div>
             ${containers || `<div class="empty-note">—</div>`}
           </div>
           <div class="dcard">
@@ -1198,13 +1266,29 @@
       tickProjects();
     });
     wireDomains(d);
+    // project total, with the peak available on hover
+    interactiveSpark("spark-cpu-detail", seriesFrom(d.history, "cpu_pct"),
+      Math.max(...(d.history || []).map((h) => h.cpu_pct), 5),
+      (v) => `${v.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`);
+    interactiveSpark("spark-mem-detail", seriesFrom(d.history, "mem_bytes"),
+      Math.max(...(d.history || []).map((h) => h.mem_bytes), 1) * 1.3, fmtMem);
+    // one series per resource
+    (d.containers || []).forEach((c, i) => {
+      const hist = (d.container_history || {})[c.name] || [];
+      interactiveSpark(`spark-res-${i}`, seriesFrom(hist, "cpu_pct"),
+        Math.max(...hist.map((h) => h.cpu_pct), 5),
+        (v) => `${v.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`);
+    });
     if (!dbState.loadedFor || dbState.loadedFor !== d.slug) {
-      dbState = { db: null, tables: [], table: null, write: false, loadedFor: d.slug };
+      dbState = { db: null, tables: [], table: null, write: false, loadedFor: d.slug, env: null };
       loadDatabase(d.slug);
       loadEnv(d.slug);
     } else {
       renderDatabaseCard(d.slug);
       renderDataTab(d.slug);
+      // the card is rebuilt on every refresh: repaint it from what we have,
+      // otherwise it sits on the loading placeholder forever
+      if (dbState.env) renderEnvCard(d.slug, dbState.env); else loadEnv(d.slug);
     }
     const delBtn = $("proj-delete");
     if (delBtn) delBtn.addEventListener("click", () => openDeleteModal(d));
@@ -1372,10 +1456,15 @@
   }
 
   async function loadEnv(slug) {
-    const card = $("env-card");
-    if (!card) return;
     let data = { vars: [], expected: [], missing: [] };
     try { data = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/env`)).json(); } catch {}
+    dbState.env = data;
+    renderEnvCard(slug, data);
+  }
+
+  function renderEnvCard(slug, data) {
+    const card = $("env-card");
+    if (!card) return;
     const rows = (data.vars || []).map((v) => `
       <div class="kv-row">
         <span class="kv-key">${esc(v.key)}</span>

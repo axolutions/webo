@@ -150,6 +150,7 @@ async fn project_detail(
         "volume_bytes": live.volume_bytes,
         "containers": live.containers,
         "history": live.history,
+        "container_history": live.container_history,
         "builds": builds,
         "versions": versions,
     }))
@@ -845,6 +846,7 @@ mod tests {
         let mut live = ProjectLive {
             containers: vec![ProjectContainer {
                 name: "codo".into(),
+                role: "app".into(),
                 image: "ghcr.io/murichristopher/codo:latest".into(),
                 state: "running".into(),
                 uptime_secs: 3600,

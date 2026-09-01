@@ -1,5 +1,6 @@
 pub mod cloudflare;
 pub mod collector;
+pub mod db;
 pub mod metrics;
 pub mod projects;
 pub mod scaffold;

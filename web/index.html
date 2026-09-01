@@ -251,6 +251,25 @@
   .btn-sm:hover { color: var(--text); border-color: var(--stroke-strong); }
   .url-link { color: var(--accent); text-decoration: none; }
   .url-link:hover { text-decoration: underline; }
+  .kv-row { display: flex; align-items: center; gap: 12px; padding: 11px 20px; border-top: 1px solid var(--stroke); }
+  .kv-row:first-of-type { border-top: 0; }
+  .kv-key { font-family: var(--mono); font-size: 12.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .kv-val { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .tag-managed { font-size: 10.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+  .tag-missing { font-size: 10.5px; font-weight: 600; color: var(--danger); background: rgba(229,72,77,0.14); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+  .db-empty { display: flex; flex-direction: column; gap: 12px; padding: 20px; align-items: flex-start; }
+  .sql-box { width: 100%; min-height: 110px; padding: 12px 14px; border: 1px solid var(--stroke); border-radius: 12px; background: var(--surface-2); color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.5; outline: none; resize: vertical; }
+  .sql-box:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+  .write-toggle { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .write-toggle input { accent-color: var(--danger); width: 15px; height: 15px; }
+  .write-on { color: var(--danger); font-weight: 600; }
+  .grid-wrap { overflow-x: auto; border-top: 1px solid var(--stroke); }
+  table.data { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.data th, table.data td { text-align: left; padding: 8px 14px; border-bottom: 1px solid var(--stroke); white-space: nowrap; }
+  table.data th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); position: sticky; top: 0; background: var(--surface-2); }
+  table.data td { font-family: var(--mono); color: var(--text-2); }
+  .table-chip { display: flex; align-items: center; gap: 8px; padding: 8px 13px; border: 1px solid var(--stroke); border-radius: 10px; background: var(--surface-2); font-family: var(--mono); font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .table-chip:hover, .table-chip.on { border-color: var(--accent); color: var(--text); }
   .cname-box { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; border-radius: 11px; background: var(--surface); border: 1px solid var(--stroke); }
   .btn-danger { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 16px; border: 1px solid rgba(229, 72, 77, 0.45); border-radius: 12px; background: rgba(229, 72, 77, 0.12); color: var(--danger); font-weight: 600; font-size: 13.5px; font-family: inherit; cursor: pointer; }
   .btn-danger:hover { background: rgba(229, 72, 77, 0.2); }
@@ -512,6 +531,18 @@
       domUnavailable: "Cloudflare not configured on the server — domains unavailable",
       domInvalid: "invalid domain", domFail: (m) => `failed: ${m}`,
       domReserved: "Domain reserved",
+      dbTitle: "Database", dbNone: "This project has no database yet.",
+      dbCreate: "create postgres", dbCreating: "creating…",
+      dbKindPg: "PostgreSQL · own container", dbKindSqlite: "SQLite · file in a volume",
+      dbNotPersisted: "this file is not in a volume — every deploy wipes it",
+      dbDrop: "delete database", dbRestartNeeded: "variables written — restart the app to pick up DATABASE_URL",
+      envTitle: "Variables", envManaged: "managed", envMissing: "missing",
+      envExpected: (n) => `${n} expected by the repo`,
+      envAdd: "add variable", envKey: "KEY", envValue: "value", envSave: "save",
+      dataTitle: "Data", dataTables: "Tables", dataNoTables: "no tables yet",
+      dataRun: "run", dataWrite: "write mode", dataWriteOn: "write mode ON",
+      dataRows: (n) => `${n} rows`, dataTruncated: "showing the first rows",
+      dataEmpty: "no rows", dataError: (m) => `error: ${m}`,
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -606,6 +637,18 @@
       domUnavailable: "Cloudflare não configurado no servidor — domínios indisponíveis",
       domInvalid: "domínio inválido", domFail: (m) => `falhou: ${m}`,
       domReserved: "Domínio reservado",
+      dbTitle: "Banco de dados", dbNone: "Este projeto ainda não tem banco.",
+      dbCreate: "criar postgres", dbCreating: "criando…",
+      dbKindPg: "PostgreSQL · container próprio", dbKindSqlite: "SQLite · arquivo em volume",
+      dbNotPersisted: "este arquivo não está em volume — todo deploy zera os dados",
+      dbDrop: "excluir banco", dbRestartNeeded: "variáveis gravadas — reinicie o app pra ele ler a DATABASE_URL",
+      envTitle: "Variáveis", envManaged: "gerenciada", envMissing: "faltando",
+      envExpected: (n) => `${n} esperadas pelo repo`,
+      envAdd: "adicionar variável", envKey: "CHAVE", envValue: "valor", envSave: "salvar",
+      dataTitle: "Dados", dataTables: "Tabelas", dataNoTables: "nenhuma tabela ainda",
+      dataRun: "rodar", dataWrite: "modo escrita", dataWriteOn: "modo escrita LIGADO",
+      dataRows: (n) => `${n} linhas`, dataTruncated: "mostrando as primeiras linhas",
+      dataEmpty: "sem linhas", dataError: (m) => `erro: ${m}`,
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -1110,6 +1153,8 @@
       <div class="detail-cols">
         <div style="display:flex;flex-direction:column;gap:16px">
           ${domainsCard(d)}
+          <div class="dcard" id="db-card"><div class="dcard-title"><span class="label">${t("dbTitle")}</span></div><div class="empty-note">…</div></div>
+          <div class="dcard" id="env-card"><div class="dcard-title"><span class="label">${t("envTitle")}</span></div><div class="empty-note">…</div></div>
           <div class="dcard">
             <div class="dcard-title"><span class="label">${t("liveContainers")}</span><span class="sub">${t("updatesEvery", 15)}</span></div>
             ${containers || `<div class="empty-note">—</div>`}
@@ -1144,7 +1189,8 @@
             </div>
           </div>` : ""}
         </div>
-      </div>`;
+      </div>
+      <div class="dcard" id="data-card" style="margin-top:16px" hidden></div>`;
     $("proj-back").addEventListener("click", () => {
       currentProject = null;
       $("view-project-detail").hidden = true;
@@ -1152,6 +1198,14 @@
       tickProjects();
     });
     wireDomains(d);
+    if (!dbState.loadedFor || dbState.loadedFor !== d.slug) {
+      dbState = { db: null, tables: [], table: null, write: false, loadedFor: d.slug };
+      loadDatabase(d.slug);
+      loadEnv(d.slug);
+    } else {
+      renderDatabaseCard(d.slug);
+      renderDataTab(d.slug);
+    }
     const delBtn = $("proj-delete");
     if (delBtn) delBtn.addEventListener("click", () => openDeleteModal(d));
   }
@@ -1241,6 +1295,208 @@
         await fetch(`/api/v1/projects/${encodeURIComponent(d.slug)}/domain`, { method: "DELETE" });
         tickProjects();
       } catch {}
+    });
+  }
+
+  // ---------- database, variables and the data tab ----------
+  let dbState = { db: null, tables: [], table: null, write: false };
+
+  async function loadDatabase(slug) {
+    try {
+      const r = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/database`)).json();
+      dbState.db = r.database || null;
+    } catch { dbState.db = null; }
+    renderDatabaseCard(slug);
+    if (dbState.db) loadTables(slug);
+  }
+
+  function renderDatabaseCard(slug) {
+    const card = $("db-card");
+    if (!card) return;
+    const db = dbState.db;
+    if (!db) {
+      card.innerHTML = `
+        <div class="dcard-title"><span class="label">${t("dbTitle")}</span></div>
+        <div class="db-empty">
+          <span class="sub">${t("dbNone")}</span>
+          <button class="btn-primary" id="db-create">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>
+            ${t("dbCreate")}
+          </button>
+        </div>`;
+      $("db-create").addEventListener("click", async (ev) => {
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        btn.textContent = t("dbCreating");
+        try {
+          const res = await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/database`, { method: "POST" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || res.status);
+          dbState.db = data.database;
+          renderDatabaseCard(slug);
+          loadEnv(slug);
+          loadTables(slug);
+        } catch (e) {
+          card.querySelector(".db-empty").insertAdjacentHTML("beforeend",
+            `<span class="sub" style="color:var(--danger)">${t("dataError", esc(e.message || "?"))}</span>`);
+        }
+      });
+      return;
+    }
+    const pg = db.kind === "postgres";
+    card.innerHTML = `
+      <div class="dcard-title">
+        <span class="label">${t("dbTitle")}</span>
+        <span class="sub">${pg ? t("dbKindPg") : t("dbKindSqlite")}</span>
+      </div>
+      <div class="kv-row">
+        <div class="icon-sq" style="background:${hexSoft(pg ? "#38bdf8" : "#3fca7c", 0.14)}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="${pg ? "#38bdf8" : "var(--ok)"}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0">
+          <span style="font-family:var(--mono);font-size:13px">${esc(pg ? (db.container || "") : (db.file_path || ""))}</span>
+          <span class="sub">${pg ? esc(db.db_name || "") : esc(db.volume || "")}</span>
+        </div>
+        ${pg ? `<button class="btn-sm" id="db-drop">${t("dbDrop")}</button>` : ""}
+      </div>
+      ${!db.persisted ? `<div class="warn-strip" style="margin:12px 20px">⚠ ${t("dbNotPersisted")}</div>` : ""}`;
+    const drop = $("db-drop");
+    if (drop) drop.addEventListener("click", async () => {
+      drop.disabled = true;
+      await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/database`, { method: "DELETE" });
+      dbState = { db: null, tables: [], table: null, write: false };
+      renderDatabaseCard(slug);
+      loadEnv(slug);
+      renderDataTab(slug);
+    });
+  }
+
+  async function loadEnv(slug) {
+    const card = $("env-card");
+    if (!card) return;
+    let data = { vars: [], expected: [], missing: [] };
+    try { data = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/env`)).json(); } catch {}
+    const rows = (data.vars || []).map((v) => `
+      <div class="kv-row">
+        <span class="kv-key">${esc(v.key)}</span>
+        <span class="kv-val">${esc(v.preview)}</span>
+        ${v.managed ? `<span class="tag-managed">${t("envManaged")}</span>`
+                    : `<button class="btn-sm" data-envdel="${esc(v.key)}">×</button>`}
+      </div>`).join("");
+    const missing = (data.missing || []).map((k) => `
+      <div class="kv-row">
+        <span class="kv-key" style="color:var(--text-3)">${esc(k)}</span>
+        <span class="tag-missing">${t("envMissing")}</span>
+      </div>`).join("");
+    card.innerHTML = `
+      <div class="dcard-title">
+        <span class="label">${t("envTitle")}</span>
+        <span class="sub">${(data.expected || []).length ? t("envExpected", data.expected.length) : ""}</span>
+      </div>
+      ${rows}${missing}
+      <div style="display:flex;gap:8px;padding:14px 20px;border-top:1px solid var(--stroke)">
+        <input class="dom-input" id="env-key" placeholder="${t("envKey")}" style="flex:0 0 34%;text-transform:uppercase">
+        <input class="dom-input" id="env-value" placeholder="${t("envValue")}">
+        <button class="btn-primary" id="env-save">${t("envSave")}</button>
+      </div>
+      <span class="sub" id="env-msg" style="padding:0 20px 14px" hidden></span>`;
+    $("env-save").addEventListener("click", async () => {
+      const key = $("env-key").value.trim().toUpperCase();
+      const value = $("env-value").value;
+      if (!key) return;
+      const res = await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/env`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key, value }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        $("env-msg").hidden = false;
+        $("env-msg").style.color = "var(--danger)";
+        $("env-msg").textContent = t("dataError", data.error || res.status);
+        return;
+      }
+      loadEnv(slug);
+    });
+    card.querySelectorAll("[data-envdel]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/env?key=${encodeURIComponent(b.dataset.envdel)}`, { method: "DELETE" });
+        loadEnv(slug);
+      });
+    });
+  }
+
+  async function loadTables(slug) {
+    try {
+      const r = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/database/tables`)).json();
+      dbState.tables = r.tables || [];
+    } catch { dbState.tables = []; }
+    renderDataTab(slug);
+  }
+
+  async function runSql(slug, sql, write) {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/database/query`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sql, write }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    return data;
+  }
+
+  function renderResult(data) {
+    const out = $("sql-result");
+    if (!out) return;
+    if (!data.columns || !data.columns.length) {
+      out.innerHTML = `<div class="empty-note">${esc((data.raw || t("dataEmpty")).trim().slice(0, 400))}</div>`;
+      return;
+    }
+    const head = data.columns.map((c) => `<th>${esc(c)}</th>`).join("");
+    const body = data.rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("");
+    out.innerHTML = `
+      <div class="grid-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+      <div style="padding:10px 20px" class="sub">${t("dataRows", data.row_count)}${data.truncated ? " · " + t("dataTruncated") : ""}</div>`;
+  }
+
+  function renderDataTab(slug) {
+    const host = $("data-card");
+    if (!host) return;
+    if (!dbState.db) { host.hidden = true; return; }
+    host.hidden = false;
+    const chips = dbState.tables.length
+      ? dbState.tables.map((tb) => `<button class="table-chip${dbState.table === tb ? " on" : ""}" data-table="${esc(tb)}">${esc(tb)}</button>`).join("")
+      : `<span class="sub">${t("dataNoTables")}</span>`;
+    host.innerHTML = `
+      <div class="dcard-title"><span class="label">${t("dataTitle")}</span><span class="sub">${dbState.db.kind}</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;padding:14px 20px">${chips}</div>
+      <div style="display:flex;flex-direction:column;gap:10px;padding:0 20px 16px">
+        <textarea class="sql-box" id="sql-input" spellcheck="false" placeholder="SELECT * FROM ...">${esc(dbState.sql || "")}</textarea>
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <button class="btn-primary" id="sql-run">${t("dataRun")}</button>
+          <label class="write-toggle${dbState.write ? " write-on" : ""}">
+            <input type="checkbox" id="sql-write" ${dbState.write ? "checked" : ""}>
+            ${dbState.write ? t("dataWriteOn") : t("dataWrite")}
+          </label>
+        </div>
+      </div>
+      <div id="sql-result"></div>`;
+    host.querySelectorAll("[data-table]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        dbState.table = b.dataset.table;
+        dbState.sql = `SELECT * FROM ${b.dataset.table} LIMIT 50;`;
+        renderDataTab(slug);
+        try { renderResult(await runSql(slug, dbState.sql, false)); }
+        catch (e) { $("sql-result").innerHTML = `<div class="empty-note" style="color:var(--danger)">${t("dataError", esc(e.message))}</div>`; }
+      });
+    });
+    $("sql-write").addEventListener("change", (ev) => { dbState.write = ev.target.checked; renderDataTab(slug); });
+    $("sql-run").addEventListener("click", async () => {
+      dbState.sql = $("sql-input").value;
+      $("sql-run").disabled = true;
+      try { renderResult(await runSql(slug, dbState.sql, dbState.write)); }
+      catch (e) { $("sql-result").innerHTML = `<div class="empty-note" style="color:var(--danger)">${t("dataError", esc(e.message))}</div>`; }
+      $("sql-run").disabled = false;
     });
   }
 

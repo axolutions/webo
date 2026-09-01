@@ -383,6 +383,47 @@ pub async fn sqlite_query(db: &Database, sql: &str, write: bool) -> Result<Strin
     .await
 }
 
+/// Host directory holding the apps' compose files and `.env`.
+pub fn apps_dir() -> String {
+    std::env::var("WEBO_APPS_DIR").unwrap_or_else(|_| "/home/homelab/apps".into())
+}
+
+/// Writes `<apps dir>/<app>/.env` on the host through a helper container:
+/// webo lives in a container, so it cannot touch the host filesystem directly.
+pub async fn write_app_env(app: &str, body: &str) -> Result<(), String> {
+    if app.is_empty() || app.contains('/') || app.contains("..") {
+        return Err("invalid app name".into());
+    }
+    let docker = Docker::connect_with_unix_defaults().map_err(|e| e.to_string())?;
+    let encoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(body)
+    };
+    // base64 keeps quotes, newlines and specials intact through the shell
+    let script = format!(
+        "mkdir -p /apps/{app} && echo '{encoded}' | base64 -d > /apps/{app}/.env && echo WEBO_ENV_OK"
+    );
+    let out = run_helper(
+        &docker,
+        Config {
+            image: Some(SQLITE_IMAGE.to_string()),
+            cmd: Some(vec!["sh".into(), "-c".into(), script]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec![format!("{}:/apps", apps_dir())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        &helper_name("env"),
+    )
+    .await?;
+    if out.contains("WEBO_ENV_OK") {
+        Ok(())
+    } else {
+        Err(format!("could not write the env file: {}", out.trim()))
+    }
+}
+
 fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -393,6 +434,39 @@ fn now_ts() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apps_dir_is_configurable() {
+        let _lock = crate::testutil::env_lock();
+        std::env::remove_var("WEBO_APPS_DIR");
+        assert_eq!(apps_dir(), "/home/homelab/apps");
+        std::env::set_var("WEBO_APPS_DIR", "/srv/apps");
+        assert_eq!(apps_dir(), "/srv/apps");
+        std::env::remove_var("WEBO_APPS_DIR");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn env_file_lands_on_the_host_directory() {
+        if !docker_available() {
+            return;
+        }
+        let _lock = crate::testutil::env_lock();
+        let dir = std::env::temp_dir().join(format!("webo-apps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("WEBO_APPS_DIR", dir.to_string_lossy().to_string());
+
+        // values with quotes and specials must survive the trip
+        let body = "DATABASE_URL=postgres://u:p@h:5432/d\nQUOTED=\"hi there\"\n";
+        write_app_env("myapp", body).await.expect("written");
+        let written = std::fs::read_to_string(dir.join("myapp/.env")).expect("file on the host");
+        assert_eq!(written, body);
+
+        assert!(write_app_env("../escape", body).await.is_err(), "path traversal refused");
+        assert!(write_app_env("", body).await.is_err());
+
+        std::env::remove_var("WEBO_APPS_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn pg_ident_is_always_a_valid_identifier() {

@@ -267,7 +267,7 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
         // merge into shared state, carrying history forward
         let mut st = state.write().await;
         for (slug, mut live) in groups {
-            let sample = ProjectSample { ts: now, cpu_pct: live.cpu_pct, mem_bytes: live.mem_bytes };
+            let sample = ProjectSample { ts: now, cpu_pct: live.cpu_pct, mem_bytes: live.mem_bytes, disk_bps: live.disk_bps };
             if let Some(old) = st.projects_live.remove(&slug) {
                 live.history = old.history;
                 live.container_history = old.container_history;
@@ -277,7 +277,7 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
             let per_container: Vec<(String, ProjectSample)> = live
                 .containers
                 .iter()
-                .map(|c| (c.name.clone(), ProjectSample { ts: now, cpu_pct: c.cpu_pct, mem_bytes: c.mem_bytes }))
+                .map(|c| (c.name.clone(), ProjectSample { ts: now, cpu_pct: c.cpu_pct, mem_bytes: c.mem_bytes, disk_bps: c.disk_bps }))
                 .collect();
             for (name, sample) in per_container {
                 let series = live.container_history.entry(name).or_default();
@@ -503,10 +503,10 @@ mod tests {
         // stay independent — the panel draws one sparkline per card
         let mut live = ProjectLive::default();
         for i in 0..3u64 {
-            push_history(&mut live, ProjectSample { ts: i, cpu_pct: i as f32, mem_bytes: i * 10 });
+            push_history(&mut live, ProjectSample { ts: i, cpu_pct: i as f32, mem_bytes: i * 10, disk_bps: i });
             for (name, cpu) in [("app", 1.0f32), ("db", 0.5)] {
                 let series = live.container_history.entry(name.to_string()).or_default();
-                series.push_back(ProjectSample { ts: i, cpu_pct: cpu, mem_bytes: 5 });
+                series.push_back(ProjectSample { ts: i, cpu_pct: cpu, mem_bytes: 5, disk_bps: 1 });
             }
         }
         assert_eq!(live.history.len(), 3);
@@ -521,7 +521,7 @@ mod tests {
     fn history_is_capped() {
         let mut live = ProjectLive::default();
         for i in 0..(HISTORY_CAP + 5) {
-            push_history(&mut live, ProjectSample { ts: i as u64, cpu_pct: 0.0, mem_bytes: 0 });
+            push_history(&mut live, ProjectSample { ts: i as u64, cpu_pct: 0.0, mem_bytes: 0, disk_bps: 0 });
         }
         assert_eq!(live.history.len(), HISTORY_CAP);
         assert_eq!(live.history.front().unwrap().ts, 5);

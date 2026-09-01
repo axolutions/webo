@@ -54,6 +54,14 @@ pub struct Database {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct LogLine {
+    pub ts: i64,
+    pub container: String,
+    pub stream: String,
+    pub line: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct EnvVar {
     pub key: String,
     pub value: String,
@@ -137,6 +145,14 @@ CREATE TABLE IF NOT EXISTS databases (
     file_path TEXT,
     persisted INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL
+);
+-- full-text log index: survives the container being recreated on deploy
+CREATE VIRTUAL TABLE IF NOT EXISTS logs USING fts5(
+    line,
+    project_id UNINDEXED,
+    container UNINDEXED,
+    stream UNINDEXED,
+    ts UNINDEXED
 );
 CREATE TABLE IF NOT EXISTS env_vars (
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -335,6 +351,116 @@ impl Store {
     pub fn delete_database(&self, project_id: i64) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM databases WHERE project_id = ?1", params![project_id])?;
+        Ok(())
+    }
+
+    /// Appends collected lines. Cheap and batched: the collector calls this
+    /// every few seconds with whatever is new.
+    pub fn insert_logs(&self, project_id: i64, lines: &[LogLine]) -> rusqlite::Result<usize> {
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for l in lines {
+            tx.execute(
+                "INSERT INTO logs (line, project_id, container, stream, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![l.line, project_id, l.container, l.stream, l.ts],
+            )?;
+        }
+        tx.commit()?;
+        Ok(lines.len())
+    }
+
+    /// Newest timestamp stored for a container, so collection resumes where
+    /// it stopped instead of re-reading everything.
+    pub fn last_log_ts(&self, project_id: i64, container: &str) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(CAST(ts AS INTEGER)) FROM logs WHERE project_id = ?1 AND container = ?2",
+            params![project_id, container],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    }
+
+    /// Search: free text (FTS5 when a query is given), optional container and
+    /// time window, newest first.
+    pub fn search_logs(
+        &self,
+        project_id: i64,
+        query: Option<&str>,
+        container: Option<&str>,
+        since: Option<i64>,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<LogLine>> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from(
+            "SELECT CAST(ts AS INTEGER) AS t, container, stream, line FROM logs WHERE project_id = ?1",
+        );
+        if query.is_some() {
+            sql.push_str(" AND logs MATCH ?2");
+        }
+        let mut out = Vec::new();
+        let filter_container = container.map(|c| c.to_string());
+        let since = since.unwrap_or(0);
+        sql.push_str(" ORDER BY t DESC LIMIT 5000");
+        let mut stmt = conn.prepare(&sql)?;
+        let mut push = |rows: rusqlite::MappedRows<'_, _>| -> rusqlite::Result<()> {
+            for row in rows {
+                let l: LogLine = row?;
+                if l.ts < since {
+                    continue;
+                }
+                if filter_container.as_ref().is_some_and(|c| &l.container != c) {
+                    continue;
+                }
+                if out.len() < limit {
+                    out.push(l);
+                }
+            }
+            Ok(())
+        };
+        let map = |r: &rusqlite::Row| {
+            Ok(LogLine { ts: r.get(0)?, container: r.get(1)?, stream: r.get(2)?, line: r.get(3)? })
+        };
+        match query {
+            Some(q) => push(stmt.query_map(params![project_id, q], map)?)?,
+            None => push(stmt.query_map(params![project_id], map)?)?,
+        }
+        Ok(out)
+    }
+
+    /// Bytes a project's logs occupy, and pruning of the oldest lines above
+    /// the cap — a runaway app must never fill the disk.
+    pub fn logs_bytes(&self, project_id: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(line)), 0) FROM logs WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get(0),
+        )
+    }
+
+    pub fn prune_logs(&self, project_id: i64, max_bytes: i64) -> rusqlite::Result<usize> {
+        if self.logs_bytes(project_id)? <= max_bytes {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        // drop the oldest tenth and let the next pass check again
+        let removed = conn.execute(
+            "DELETE FROM logs WHERE rowid IN (
+                SELECT rowid FROM logs WHERE project_id = ?1
+                ORDER BY CAST(ts AS INTEGER) ASC
+                LIMIT MAX(100, (SELECT COUNT(*) / 10 FROM logs WHERE project_id = ?1))
+            )",
+            params![project_id],
+        )?;
+        Ok(removed)
+    }
+
+    pub fn delete_logs(&self, project_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM logs WHERE project_id = ?1", params![project_id])?;
         Ok(())
     }
 
@@ -588,6 +714,56 @@ mod tests {
         let p = s.project_by_slug("axofin").unwrap().unwrap();
         assert_eq!(p.source, "registered");
         assert_eq!(p.repo_owner.as_deref(), Some("murichristopher"));
+    }
+
+    #[test]
+    fn logs_are_searchable_resumable_and_pruned() {
+        let s = store();
+        s.upsert_discovered("app", "app", None, None, 1).unwrap();
+        let id = s.project_by_slug("app").unwrap().unwrap().id;
+        let line = |ts: i64, c: &str, text: &str| LogLine {
+            ts,
+            container: c.into(),
+            stream: "stdout".into(),
+            line: text.into(),
+        };
+        s.insert_logs(id, &[
+            line(100, "app", "server started on port 3000"),
+            line(200, "app", "GET /health 200"),
+            line(300, "db", "database system is ready"),
+            line(400, "app", "ERROR connection refused"),
+        ]).unwrap();
+
+        // newest first
+        let all = s.search_logs(id, None, None, None, 10).unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].ts, 400);
+
+        // full text
+        let hits = s.search_logs(id, Some("connection"), None, None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].line.contains("ERROR"));
+
+        // by container and by window
+        let only_db = s.search_logs(id, None, Some("db"), None, 10).unwrap();
+        assert_eq!(only_db.len(), 1);
+        let recent = s.search_logs(id, None, None, Some(250), 10).unwrap();
+        assert_eq!(recent.len(), 2, "only lines at or after the window");
+
+        // collection resumes from the newest stored line
+        assert_eq!(s.last_log_ts(id, "app").unwrap(), Some(400));
+        assert_eq!(s.last_log_ts(id, "nope").unwrap(), None);
+
+        // pruning drops the oldest and keeps the newest
+        let bytes = s.logs_bytes(id).unwrap();
+        assert!(bytes > 0);
+        assert_eq!(s.prune_logs(id, bytes + 1000).unwrap(), 0, "under the cap nothing is dropped");
+        assert!(s.prune_logs(id, 1).unwrap() > 0);
+        let left = s.search_logs(id, None, None, None, 10).unwrap();
+        assert!(left.iter().all(|l| l.ts >= 100));
+
+        s.delete_logs(id).unwrap();
+        assert!(s.search_logs(id, None, None, None, 10).unwrap().is_empty());
     }
 
     #[test]

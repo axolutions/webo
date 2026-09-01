@@ -19,6 +19,7 @@ async fn main() {
     tokio::spawn(collector::run(state.clone(), sample_secs));
     tokio::spawn(projects::run(state.clone(), store.clone(), sample_secs));
     tokio::spawn(github::run(store.clone(), 120));
+    tokio::spawn(webo::logs::run(store.clone(), 10));
 
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     println!("webo serving at http://{bind}");

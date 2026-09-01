@@ -278,6 +278,13 @@
     box-shadow: 0 10px 24px -14px rgba(0,0,0,0.9);
   }
   .spark-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--stroke-strong); pointer-events: none; }
+  .log-line { display: flex; gap: 12px; padding: 5px 20px; font-family: var(--mono); font-size: 12px; line-height: 1.5; border-top: 1px solid rgba(255,255,255,0.03); }
+  .log-line:hover { background: var(--surface); }
+  .log-ts { color: var(--text-3); white-space: nowrap; flex: none; }
+  .log-src { color: var(--accent); white-space: nowrap; flex: none; opacity: 0.85; }
+  .log-txt { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  .log-err .log-txt { color: var(--danger); }
+  .log-scroll { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; }
   .res-row { display: flex; align-items: center; gap: 13px; padding: 13px 20px; border-top: 1px solid var(--stroke); }
   .res-row:first-of-type { border-top: 0; }
   .role-badge { font-size: 10.5px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
@@ -557,6 +564,10 @@
       dataEmpty: "no rows", dataError: (m) => `error: ${m}`,
       resources: "Resources", roleApp: "app", roleDatabase: "database",
       last24h2: "last 24 h", reveal: "show value", hide: "hide value",
+      logs: "Logs", logsSearch: "search the logs…", logsAll: "all resources",
+      logsWindow: "window", logs15m: "15 min", logs1h: "1 h", logs24h: "24 h", logs7d: "7 days", logsAllTime: "everything",
+      logsEmpty: "nothing here for this filter", logsStored: (a, b) => `${a} of ${b} stored`,
+      logsOpen: "see the logs", logsLive: "live", logsIndexed: "indexed",
       footer: "webo · self-hosted health panel",
     },
     pt: {
@@ -665,6 +676,10 @@
       dataEmpty: "sem linhas", dataError: (m) => `erro: ${m}`,
       resources: "Recursos", roleApp: "app", roleDatabase: "banco",
       last24h2: "últimas 24 h", reveal: "ver valor", hide: "ocultar",
+      logs: "Logs", logsSearch: "buscar nos logs…", logsAll: "todos os recursos",
+      logsWindow: "período", logs15m: "15 min", logs1h: "1 h", logs24h: "24 h", logs7d: "7 dias", logsAllTime: "tudo",
+      logsEmpty: "nada aqui com esse filtro", logsStored: (a, b) => `${a} de ${b} guardados`,
+      logsOpen: "ver os logs", logsLive: "ao vivo", logsIndexed: "indexado",
       footer: "webo · painel de saúde self-hosted",
     },
   };
@@ -1158,6 +1173,14 @@
             <div class="spark-host" id="spark-res-mem-${i}" style="width:96px"></div>
             <span class="sub">RAM · ${t("last24h2")}</span>
           </div>
+          <div style="display:flex;flex-direction:column;gap:3px;align-items:flex-end">
+            <span class="cell-num">${fmtDisk(c.disk_bps)}</span>
+            <div class="spark-host" id="spark-res-disk-${i}" style="width:96px"></div>
+            <span class="sub">${t("disk")} · ${t("last24h2")}</span>
+          </div>
+          <button class="btn-sm" data-logs="${esc(c.name)}" title="${t("logsOpen")}" aria-label="${t("logsOpen")}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+          </button>
         </div>
       </div>`).join("");
     const builds = (d.builds || []).map((b) => {
@@ -1274,6 +1297,7 @@
           </div>` : ""}
         </div>
       </div>
+      <div class="dcard" id="logs-card" style="margin-top:16px"></div>
       <div class="dcard" id="data-card" style="margin-top:16px" hidden></div>`;
     $("proj-back").addEventListener("click", () => {
       currentProject = null;
@@ -1281,6 +1305,7 @@
       $("view-projects").hidden = false;
       tickProjects();
     });
+    currentDetail = d;
     wireDomains(d);
     // project total, with the peak available on hover
     interactiveSpark("spark-cpu-detail", seriesFrom(d.history, "cpu_pct"),
@@ -1294,14 +1319,26 @@
         Math.max(...hist.map((h) => h.cpu_pct), 5),
         (v) => `${v.toLocaleString(LOCALE, { maximumFractionDigits: 1 })}%`);
       interactiveSpark(`spark-res-mem-${i}`, seriesFrom(hist, "mem_bytes"), null, fmtMem, true);
+      interactiveSpark(`spark-res-disk-${i}`, seriesFrom(hist, "disk_bps"),
+        Math.max(...hist.map((h) => h.disk_bps || 0), 1024), (v) => fmtDisk(v));
+    });
+    document.querySelectorAll("[data-logs]").forEach((b) => {
+      b.addEventListener("click", () => {
+        logState.container = b.dataset.logs;
+        loadLogs(d.slug);
+        $("logs-card")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
     });
     if (!dbState.loadedFor || dbState.loadedFor !== d.slug) {
       dbState = { db: null, tables: [], table: null, write: false, loadedFor: d.slug, env: null };
+      logState = { container: null, q: "", minutes: 60, lines: [], stored: 0, max: 0, loadedFor: null };
       loadDatabase(d.slug);
       loadEnv(d.slug);
+      loadLogs(d.slug);
     } else {
       renderDatabaseCard(d.slug);
       renderDataTab(d.slug);
+      renderLogs(d.slug);
       // the card is rebuilt on every refresh: repaint it from what we have,
       // otherwise it sits on the loading placeholder forever
       if (dbState.env) renderEnvCard(d.slug, dbState.env); else loadEnv(d.slug);
@@ -1400,6 +1437,7 @@
 
   // ---------- database, variables and the data tab ----------
   let dbState = { db: null, tables: [], table: null, write: false };
+  let currentDetail = null;
 
   async function loadDatabase(slug) {
     try {
@@ -1626,6 +1664,73 @@
       catch (e) { $("sql-result").innerHTML = `<div class="empty-note" style="color:var(--danger)">${t("dataError", esc(e.message))}</div>`; }
       $("sql-run").disabled = false;
     });
+  }
+
+  // ---------- logs ----------
+  let logState = { container: null, q: "", minutes: 60, lines: [], stored: 0, max: 0, loadedFor: null };
+
+  async function loadLogs(slug) {
+    const params = new URLSearchParams();
+    if (logState.q) params.set("q", logState.q);
+    if (logState.container) params.set("container", logState.container);
+    if (logState.minutes) params.set("minutes", String(logState.minutes));
+    params.set("limit", "300");
+    try {
+      const r = await (await fetch(`/api/v1/projects/${encodeURIComponent(slug)}/logs?${params}`)).json();
+      logState.lines = r.lines || [];
+      logState.stored = r.stored_bytes || 0;
+      logState.max = r.max_bytes || 0;
+      logState.loadedFor = slug;
+    } catch { logState.lines = []; }
+    renderLogs(slug);
+  }
+
+  function renderLogs(slug) {
+    const card = $("logs-card");
+    if (!card) return;
+    const windows = [
+      [15, t("logs15m")], [60, t("logs1h")], [1440, t("logs24h")], [10080, t("logs7d")], [0, t("logsAllTime")],
+    ];
+    const chips = windows.map(([m, label]) =>
+      `<button class="table-chip${logState.minutes === m ? " on" : ""}" data-win="${m}">${label}</button>`).join("");
+    const sources = [["", t("logsAll")], ...((currentDetail?.containers || []).map((c) => [c.name, c.name]))];
+    const srcChips = sources.map(([v, label]) =>
+      `<button class="table-chip${(logState.container || "") === v ? " on" : ""}" data-src="${esc(v)}">${esc(label)}</button>`).join("");
+    const fmtTs = (ts) => new Date(ts * 1000).toLocaleString(LOCALE, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const body = logState.lines.length
+      ? `<div class="log-scroll">${logState.lines.map((l) => `
+          <div class="log-line${l.stream === "stderr" || /error|fatal|exception/i.test(l.line) ? " log-err" : ""}">
+            <span class="log-ts">${fmtTs(l.ts)}</span>
+            <span class="log-src">${esc(l.container)}</span>
+            <span class="log-txt">${esc(l.line)}</span>
+          </div>`).join("")}</div>`
+      : `<div class="empty-note">${t("logsEmpty")}</div>`;
+    card.innerHTML = `
+      <div class="dcard-title">
+        <span class="label">${t("logs")}</span>
+        <span class="sub">${logState.max ? t("logsStored", fmtMem(logState.stored), fmtMem(logState.max)) : ""}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;padding:14px 20px">
+        <div class="search-box" style="width:100%">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20 L16.5 16.5"></path></svg>
+          <input id="logs-q" type="search" autocomplete="off" placeholder="${t("logsSearch")}" value="${esc(logState.q)}">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${srcChips}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <span class="sub">${t("logsWindow")}</span>${chips}
+        </div>
+      </div>
+      ${body}`;
+    const input = $("logs-q");
+    input.addEventListener("input", () => {
+      logState.q = input.value;
+      clearTimeout(logState.timer);
+      logState.timer = setTimeout(() => loadLogs(slug), 350);
+    });
+    card.querySelectorAll("[data-win]").forEach((b) =>
+      b.addEventListener("click", () => { logState.minutes = Number(b.dataset.win); loadLogs(slug); }));
+    card.querySelectorAll("[data-src]").forEach((b) =>
+      b.addEventListener("click", () => { logState.container = b.dataset.src || null; loadLogs(slug); }));
   }
 
   function openDeleteModal(d) {

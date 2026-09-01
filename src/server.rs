@@ -1748,3 +1748,63 @@ mod tests {
         std::env::remove_var("WEBO_DEPLOY_TOKEN");
     }
 }
+
+#[cfg(test)]
+mod i18n_tests {
+    /// The front is one file with two dictionaries. A key used but never
+    /// declared renders as the raw key on screen — it has shipped twice.
+    fn keys_of(block: &str) -> std::collections::HashSet<&str> {
+        let mut out = std::collections::HashSet::new();
+        for (i, _) in block.match_indices(':') {
+            let head = &block[..i];
+            let start = head
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let name = &head[start..];
+            // a declaration is `name:` opening a line or following ", "
+            let before = head[..start].chars().last();
+            if !name.is_empty()
+                && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                && matches!(before, None | Some(' '))
+            {
+                out.insert(name);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_used_string_exists_in_both_languages() {
+        let src = include_str!("../web/index.html");
+        let en_at = src.find("    en: {").expect("en dictionary");
+        let pt_at = src.find("    pt: {").expect("pt dictionary");
+        let end = src[pt_at..].find("\n  };").expect("end of dictionaries") + pt_at;
+        let en = keys_of(&src[en_at..pt_at]);
+        let pt = keys_of(&src[pt_at..end]);
+
+        let mut used: Vec<&str> = Vec::new();
+        for (i, _) in src.match_indices("t(\"") {
+            let rest = &src[i + 3..];
+            if let Some(q) = rest.find('"') {
+                let key = &rest[..q];
+                // t( is also the tail of other identifiers; keys are plain words
+                let prev = src[..i].chars().last();
+                if !key.is_empty()
+                    && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !matches!(prev, Some(c) if c.is_ascii_alphanumeric() || c == '_')
+                {
+                    used.push(key);
+                }
+            }
+        }
+        assert!(used.len() > 100, "expected many keys, found {}", used.len());
+
+        let missing: Vec<&str> = used
+            .iter()
+            .copied()
+            .filter(|k| !en.contains(k) || !pt.contains(k))
+            .collect();
+        assert!(missing.is_empty(), "strings used but not translated: {missing:?}");
+    }
+}

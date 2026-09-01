@@ -56,6 +56,11 @@ soft backgrounds (`rgba(229,72,77,…)`) which pair with `--danger`.
 | `--sh`            | inset highlight + long soft drop | lighter pair            | card shadow (always with `--card`)                               |
 | `--mono`          | IBM Plex Mono stack              | same                    | see typography                                                   |
 | `--spark-ring`    | `#0a1226`                        | `#eef3fc`               | halo behind sparkline endpoint dots                              |
+| `--danger-soft` | `rgba(229,72,77,.14)` | same | soft red backgrounds |
+| `--danger-line` | `rgba(229,72,77,.35)` | same | red borders and threshold markers |
+| `--warn` | `#eab308` | same | warnings, browser-error identity |
+| `--warn-soft` | `rgba(234,179,8,.12)` | same | soft amber backgrounds |
+| `--code` | `rgba(0,0,0,.25)` | `rgba(15,32,68,.05)` | code/SQL/log surfaces |
 
 Semantic colors are reserved: green = alive/success, red = error/destructive,
 amber (`rgba(234,179,8,…)`, used inline in `.warn-strip` and the browser
@@ -106,6 +111,17 @@ Numbers that update or align vertically always get
 
 Reuse these. Class names are the API.
 
+### Navigation (scope-based)
+
+- `.scope-btn` + `.scope-menu` — the header's scope switcher: server row,
+  one `.scope-row` per project (tech chip + status dot + errors), and
+  `.scope-new`. Navigating IS switching scope.
+- `.seg`/`.seg-btn` — main tabs (server: overview/processes/projects;
+  project: overview/logs/database/errors/config). `.seg.sm` is the compact
+  variant used for the window selector, sort chips, ranges and state filters.
+- `.tech-chip` — the 22px technology monogram (Rs/N/Pg…), tinted per tech.
+- `.win-note` — the sentence describing the active window, left of the selector.
+
 ### Cards
 
 - `.stat-card` — overview stat: `.card-head` (`.label` + side info) →
@@ -116,6 +132,11 @@ Reuse these. Class names are the API.
   (`.label` left, `.sub` right) + content rows. **Every new detail section
   is a `.dcard`.**
 - `.proj-card` — clickable project card (hover: lift 2px + stronger border).
+- `.kpi-card` — project-overview stat: `.kpi-top` label row, `.kpi-num`
+  (25px number + unit), optional sparkline, `.kpi-trend` caption.
+- `.totals-strip`/`.total-cell` — the horizontal figures strip (projects on
+  the server, process totals), cells split by 1px strokes.
+- `.sum-grid`/`.sum-cell` — the wizard's step-4 summary tiles.
 - `.danger-card` — `.dcard` variant with red border for destructive areas.
 
 ### Rows (all: flex, gap ~13px, `padding: 12–13px 20px`, top border, first
@@ -156,6 +177,10 @@ child borderless)
 ### Inputs
 
 - `.search-box` — 38px, focus ring `0 0 0 4px var(--accent-soft)`.
+- `.txt-input` — the generic mono input (env keys/values, domains, SQL
+  names); `.danger` variant rings red. `.sql-box` — the editor textarea.
+- `.mini-btn` — 30px icon action in rows (reveal/edit/remove); `.danger`
+  variant turns red on hover.
 - `.dom-input` / `.del-input` — 40px mono inputs; same accent focus ring
   (del-input rings red).
 - `.sql-box` — mono textarea, vertical resize.
@@ -171,6 +196,26 @@ child borderless)
 - `table.data` — mono cells, sticky uppercase mono header, wrapped in
   `.grid-wrap`.
 - `.snippet-box` — mono copy-paste box, capped height, scrolls.
+
+### Sidebars & pickers
+- `.side-list`/`.side-row` — the logs/database sidebar rows (`.on` = accent
+  soft), with `.lvl-sq` level swatches and `.ct` mono counters;
+  `.side-foot` closes the card with retention/meta.
+- `.wsteps`/`.wstep` (`.cur`, `.done`) — the wizard's horizontal stepper.
+- `.mode-cards`/`.mode-card.sel` — the wizard's database choice tiles.
+- `.ver-chips`/`.ver-chip.sel` — postgres version picker.
+- `.drop-env` (`.over`) — the dashed .env drop zone.
+- `.dep-row`/`.dep-dot` (`.done`, `.cur`) — first-deploy progress list.
+
+### Data displays (additions)
+- `.hourly`/`.hourly-axis` — the log-lines-per-hour bar chart.
+- `.issue-row` grid + `.bulk-bar` (`.active`) + `.checkbox` (`.on`) — error
+  triage: selection, bulk actions, per-issue sparkline (`.issue-sparkw`),
+  `.issue-culprit` mono file, expandable `.stack-box`/`.stack-body`.
+- `.pager` — table pagination; `.insert-grid` — the inline + row form;
+  `.table-foot` — count + pager strip under tables.
+- `.live-toggle` (`.on`/`.off`) — the live tail switch.
+- `.copy-mini` — per-log-line copy button, visible on row hover.
 
 ### Overlays
 
@@ -203,9 +248,5 @@ child borderless)
 
 ## Known debt (do not copy these patterns)
 
-- `.log-line` uses a hardcoded `rgba(255,255,255,0.03)` border that ignores
-  the light theme.
-- Danger soft backgrounds repeat `rgba(229,72,77,…)` inline in five places —
-  candidates for a `--danger-soft` token.
-- The Variables card shows a bare "…" for ~6s while loading; loading states
-  have no skeleton pattern yet.
+- Loading states are a bare localized "loading…" note; there is no skeleton
+  pattern yet.

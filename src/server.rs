@@ -135,6 +135,13 @@ async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
         .iter()
         .map(|p| {
             let live = st.projects_live.get(&p.slug);
+            // a light sparkline series for the card: at most 40 points
+            let history: Vec<&crate::metrics::ProjectSample> = live
+                .map(|l| {
+                    let step = (l.history.len() / 40).max(1);
+                    l.history.iter().step_by(step).collect()
+                })
+                .unwrap_or_default();
             let last_build = api.store.builds(p.id, 1).ok().and_then(|b| b.into_iter().next());
             let current_version = api
                 .store
@@ -157,6 +164,7 @@ async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
                 "mem_bytes": live.map(|l| l.mem_bytes).unwrap_or(0),
                 "size_bytes": live.map(|l| l.image_bytes + l.volume_bytes).unwrap_or(0),
                 "open_errors": api.store.open_issue_count(p.id).unwrap_or(0),
+                "history": history,
                 "last_build": last_build,
                 "current_version": current_version.map(|v| v.tag),
             })
@@ -197,6 +205,7 @@ async fn project_detail(
         "disk_bps": live.disk_bps,
         "image_bytes": live.image_bytes,
         "volume_bytes": live.volume_bytes,
+        "open_errors": api.store.open_issue_count(p.id).unwrap_or(0),
         "containers": live.containers,
         "history": live.history,
         "container_history": live.container_history,

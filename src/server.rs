@@ -37,6 +37,7 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}/database/tables", get(database_tables))
         .route("/api/v1/projects/{slug}/database/query", axum::routing::post(database_query))
         .route("/api/v1/projects/{slug}/env", get(env_list).put(env_set).delete(env_delete))
+        .route("/api/v1/projects/{slug}/env/{key}", get(env_reveal))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
 }
@@ -753,6 +754,21 @@ async fn env_set(
     Json(serde_json::json!({ "key": key, "env_written": written, "restart_needed": true })).into_response()
 }
 
+/// One value in the clear, only when explicitly asked for — the listing
+/// stays masked so a shoulder-surfer sees nothing by default.
+async fn env_reveal(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, key)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let Some(var) = api.store.env_vars(p.id).unwrap_or_default().into_iter().find(|v| v.key == key) else {
+        return err(StatusCode::NOT_FOUND, "variable not found");
+    };
+    Json(serde_json::json!({ "key": var.key, "value": var.value })).into_response()
+}
+
 #[derive(Deserialize)]
 struct EnvKey {
     key: String,
@@ -1037,7 +1053,32 @@ mod tests {
         let (status, json) = get_json("/api/v1/projects/codo/env").await;
         assert_eq!(status, StatusCode::OK);
         let body = json.to_string();
-        assert!(!body.contains("postgres://u:p"), "value never leaves the server");
+        assert!(!body.contains("postgres://u:p"), "the listing stays masked");
+
+        // …and the value comes back only when explicitly revealed
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/projects/codo/env/DATABASE_URL")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let revealed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(revealed["value"], "postgres://u:p@h:5432/d");
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/projects/codo/env/NAO_EXISTE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let put = |api: Api, body: &str| {
             let body = body.to_string();

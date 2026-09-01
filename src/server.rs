@@ -1,6 +1,6 @@
 use crate::metrics::State;
 use crate::store::Store;
-use crate::{cloudflare, db, github, logs, projects, scaffold};
+use crate::{cloudflare, db, errors as errmod, github, logs, projects, scaffold};
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
@@ -39,6 +39,9 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}/env", get(env_list).put(env_set).delete(env_delete))
         .route("/api/v1/projects/{slug}/env/{key}", get(env_reveal))
         .route("/api/v1/projects/{slug}/logs", get(project_logs))
+        .route("/api/v1/projects/{slug}/errors", get(project_errors))
+        .route("/api/v1/projects/{slug}/errors/{id}", get(issue_detail).put(issue_resolve))
+        .route("/api/v1/ingest/{key}", axum::routing::post(ingest_error).options(ingest_preflight))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
 }
@@ -110,6 +113,7 @@ async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
                 "cpu_pct": live.map(|l| l.cpu_pct).unwrap_or(0.0),
                 "mem_bytes": live.map(|l| l.mem_bytes).unwrap_or(0),
                 "size_bytes": live.map(|l| l.image_bytes + l.volume_bytes).unwrap_or(0),
+                "open_errors": api.store.open_issue_count(p.id).unwrap_or(0),
                 "last_build": last_build,
                 "current_version": current_version.map(|v| v.tag),
             })
@@ -549,7 +553,12 @@ fn now_secs() -> i64 {
 async fn materialize_env(api: &Api, slug: &str) -> Result<(), String> {
     let Ok(Some(p)) = api.store.project_by_slug(slug) else { return Err("project not found".into()) };
     let vars = api.store.env_vars(p.id).map_err(|e| e.to_string())?;
-    let body: String = vars.iter().map(|v| format!("{}={}\n", v.key, v.value)).collect();
+    // webo's own bookkeeping (the ingest key) never reaches the app
+    let body: String = vars
+        .iter()
+        .filter(|v| !v.key.starts_with("__WEBO_"))
+        .map(|v| format!("{}={}\n", v.key, v.value))
+        .collect();
     let app = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
     db::write_app_env(&app, &body).await
 }
@@ -697,7 +706,13 @@ async fn env_list(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<Strin
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
     };
-    let defined = api.store.env_vars(p.id).unwrap_or_default();
+    let defined: Vec<_> = api
+        .store
+        .env_vars(p.id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| !v.key.starts_with("__WEBO_"))
+        .collect();
     // what the repo says it needs, so a missing one shows before the deploy breaks
     let expected = match (p.repo_owner.clone(), p.repo_name.clone(), github_token()) {
         (Some(owner), Some(name), Some(token)) => {
@@ -728,6 +743,98 @@ fn mask(value: &str) -> String {
     } else {
         format!("{}…{}", value.chars().take(4).collect::<String>(), "•".repeat(6))
     }
+}
+
+// ---------- error tracking ----------
+
+async fn project_errors(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let issues = api.store.issues(p.id, false).unwrap_or_default();
+    let key = api.store.ingest_key(p.id).unwrap_or_default();
+    let base = std::env::var("WEBO_PUBLIC_URL").unwrap_or_else(|_| "https://webo.axolutions.com.br".into());
+    Json(serde_json::json!({
+        "issues": issues,
+        "snippet": errmod::snippet(&base, &key),
+    }))
+    .into_response()
+}
+
+async fn issue_detail(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, id)): AxumPath<(String, i64)>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let belongs = api.store.issues(p.id, true).unwrap_or_default().into_iter().any(|i| i.id == id);
+    if !belongs {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    }
+    Json(serde_json::json!({ "events": api.store.issue_events(id, 20).unwrap_or_default() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ResolveReq {
+    #[serde(default)]
+    resolved: bool,
+}
+
+async fn issue_resolve(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, id)): AxumPath<(String, i64)>,
+    Json(req): Json<ResolveReq>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if !api.store.resolve_issue(p.id, id, req.resolved).unwrap_or(false) {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    }
+    Json(serde_json::json!({ "resolved": req.resolved })).into_response()
+}
+
+/// Browsers preflight the ingest POST — the endpoint is meant to be called
+/// from the app's own domain.
+async fn ingest_preflight() -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        [
+            ("access-control-allow-origin", "*"),
+            ("access-control-allow-headers", "content-type"),
+            ("access-control-allow-methods", "POST, OPTIONS"),
+        ],
+    )
+}
+
+/// Public ingestion: the key identifies the project and grants nothing but
+/// the right to report an error.
+async fn ingest_error(
+    AxumState(api): AxumState<Api>,
+    AxumPath(key): AxumPath<String>,
+    Json(report): Json<errmod::BrowserReport>,
+) -> impl IntoResponse {
+    let cors = [("access-control-allow-origin", "*")];
+    let Ok(Some(project_id)) = api.store.project_by_ingest_key(&key) else {
+        return (StatusCode::NOT_FOUND, cors, Json(serde_json::json!({"error": "unknown key"})))
+            .into_response();
+    };
+    if report.message.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, cors, Json(serde_json::json!({"error": "empty message"})))
+            .into_response();
+    }
+    let event = report.into_event(now_secs());
+    let _ = api.store.record_error(
+        project_id,
+        &errmod::fingerprint(&event.title),
+        &event.title,
+        &event.source,
+        &event.origin,
+        &event.message,
+        event.ts,
+    );
+    (StatusCode::ACCEPTED, cors, Json(serde_json::json!({ "received": true }))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1208,6 +1315,80 @@ mod tests {
         // a read on a project without a database says so plainly
         let res = post(api.clone(), r#"{"sql":"SELECT 1"}"#).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn errors_are_listed_ingested_and_resolved() {
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+
+        // a browser sends one through the public endpoint
+        let key = api.store.ingest_key(id).unwrap();
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/ingest/{key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"x is not a function","kind":"TypeError","url":"https://app/checkout","stack":"at pay (a.js:1)"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        assert_eq!(res.headers().get("access-control-allow-origin").unwrap(), "*");
+
+        // an unknown key is refused, and an empty message too
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ingest/chave-invalida")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        // the panel lists it, with the snippet ready to paste
+        let (status, json) = get_on(api.clone(), "/api/v1/projects/codo/errors").await;
+        assert_eq!(status, StatusCode::OK);
+        let issues = json["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["source"], "browser");
+        assert!(json["snippet"].as_str().unwrap().contains(&key));
+
+        // occurrences of the issue
+        let issue_id = issues[0]["id"].as_i64().unwrap();
+        let (status, json) = get_on(api.clone(), &format!("/api/v1/projects/codo/errors/{issue_id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["events"][0]["message"].as_str().unwrap().contains("at pay"));
+
+        // resolving takes it off the list and off the card count
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/projects/codo/errors/{issue_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"resolved":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors").await;
+        assert!(json["issues"].as_array().unwrap().is_empty());
+        let (_, json) = get_on(api.clone(), "/api/v1/projects").await;
+        let codo = json["projects"].as_array().unwrap().iter().find(|p| p["slug"] == "codo").unwrap();
+        assert_eq!(codo["open_errors"], 0);
+
+        // the ingest key never shows up among the app's variables
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/env").await;
+        let keys: Vec<&str> = json["vars"].as_array().unwrap().iter().map(|v| v["key"].as_str().unwrap()).collect();
+        assert!(!keys.iter().any(|k| k.starts_with("__WEBO_")), "internal keys stay hidden");
     }
 
     #[tokio::test]

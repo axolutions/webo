@@ -137,6 +137,21 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     .map(|(ts, stream, line)| LogLine { ts, container: name.clone(), stream, line })
                     .collect();
                 let _ = store.insert_logs(p.id, &lines);
+                // the same lines feed error tracking, so every app gets it
+                // without installing anything
+                for l in &lines {
+                    if crate::errors::looks_like_error(&l.line, &l.stream) {
+                        let _ = store.record_error(
+                            p.id,
+                            &crate::errors::fingerprint(&l.line),
+                            &crate::errors::title_of(&l.line),
+                            "server",
+                            &l.container,
+                            &l.line,
+                            l.ts,
+                        );
+                    }
+                }
             }
             let _ = store.prune_logs(p.id, MAX_BYTES_PER_PROJECT);
         }

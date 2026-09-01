@@ -62,6 +62,25 @@ pub struct LogLine {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Issue {
+    pub id: i64,
+    pub fingerprint: String,
+    pub title: String,
+    pub source: String,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub count: i64,
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct IssueEvent {
+    pub ts: i64,
+    pub origin: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct EnvVar {
     pub key: String,
     pub value: String,
@@ -154,6 +173,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS logs USING fts5(
     stream UNINDEXED,
     ts UNINDEXED
 );
+CREATE TABLE IF NOT EXISTS issues (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (project_id, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_issues_project ON issues (project_id, last_seen DESC);
+CREATE TABLE IF NOT EXISTS error_events (
+    id INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    ts INTEGER NOT NULL,
+    origin TEXT NOT NULL,
+    message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_issue ON error_events (issue_id, ts DESC);
 CREATE TABLE IF NOT EXISTS env_vars (
     project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
@@ -464,6 +504,123 @@ impl Store {
         Ok(())
     }
 
+    /// Records one occurrence: creates the issue on first sight, otherwise
+    /// bumps its count and last_seen. A resolved issue that happens again
+    /// comes back open — it clearly was not fixed.
+    pub fn record_error(
+        &self,
+        project_id: i64,
+        fingerprint: &str,
+        title: &str,
+        source: &str,
+        origin: &str,
+        message: &str,
+        ts: i64,
+    ) -> rusqlite::Result<i64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO issues (project_id, fingerprint, title, source, first_seen, last_seen, count, resolved)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, 0)
+             ON CONFLICT (project_id, fingerprint) DO UPDATE SET
+                last_seen = MAX(issues.last_seen, excluded.last_seen),
+                count = issues.count + 1,
+                resolved = 0",
+            params![project_id, fingerprint, title, source, ts],
+        )?;
+        let id: i64 = tx.query_row(
+            "SELECT id FROM issues WHERE project_id = ?1 AND fingerprint = ?2",
+            params![project_id, fingerprint],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO error_events (issue_id, ts, origin, message) VALUES (?1, ?2, ?3, ?4)",
+            params![id, ts, origin, message],
+        )?;
+        // keep only the most recent occurrences of each issue
+        tx.execute(
+            "DELETE FROM error_events WHERE issue_id = ?1 AND id NOT IN (
+                SELECT id FROM error_events WHERE issue_id = ?1 ORDER BY ts DESC LIMIT 50
+            )",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn issues(&self, project_id: i64, include_resolved: bool) -> rusqlite::Result<Vec<Issue>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, fingerprint, title, source, first_seen, last_seen, count, resolved
+             FROM issues WHERE project_id = ?1 AND (?2 = 1 OR resolved = 0)
+             ORDER BY last_seen DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map(params![project_id, include_resolved as i64], |r| {
+            Ok(Issue {
+                id: r.get(0)?,
+                fingerprint: r.get(1)?,
+                title: r.get(2)?,
+                source: r.get(3)?,
+                first_seen: r.get(4)?,
+                last_seen: r.get(5)?,
+                count: r.get(6)?,
+                resolved: r.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn open_issue_count(&self, project_id: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM issues WHERE project_id = ?1 AND resolved = 0",
+            params![project_id],
+            |r| r.get(0),
+        )
+    }
+
+    pub fn issue_events(&self, issue_id: i64, limit: usize) -> rusqlite::Result<Vec<IssueEvent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts, origin, message FROM error_events WHERE issue_id = ?1 ORDER BY ts DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![issue_id, limit as i64], |r| {
+            Ok(IssueEvent { ts: r.get(0)?, origin: r.get(1)?, message: r.get(2)? })
+        })?;
+        rows.collect()
+    }
+
+    pub fn resolve_issue(&self, project_id: i64, issue_id: i64, resolved: bool) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE issues SET resolved = ?1 WHERE id = ?2 AND project_id = ?3",
+            params![resolved as i64, issue_id, project_id],
+        )? > 0)
+    }
+
+    /// The ingest key a project's browser snippet carries. Created on demand.
+    pub fn ingest_key(&self, project_id: i64) -> rusqlite::Result<String> {
+        if let Some(v) = self
+            .env_vars(project_id)?
+            .into_iter()
+            .find(|v| v.key == "__WEBO_INGEST_KEY")
+        {
+            return Ok(v.value);
+        }
+        let key = crate::db::generate_password();
+        self.set_env(project_id, "__WEBO_INGEST_KEY", &key, true)?;
+        Ok(key)
+    }
+
+    pub fn project_by_ingest_key(&self, key: &str) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT project_id FROM env_vars WHERE key = '__WEBO_INGEST_KEY' AND value = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![key], |r| r.get::<_, i64>(0))?;
+        rows.next().transpose()
+    }
+
     pub fn set_env(&self, project_id: i64, key: &str, value: &str, managed: bool) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -714,6 +871,47 @@ mod tests {
         let p = s.project_by_slug("axofin").unwrap().unwrap();
         assert_eq!(p.source, "registered");
         assert_eq!(p.repo_owner.as_deref(), Some("murichristopher"));
+    }
+
+    #[test]
+    fn errors_group_count_and_reopen() {
+        let s = store();
+        s.upsert_discovered("app", "app", None, None, 1).unwrap();
+        let id = s.project_by_slug("app").unwrap().unwrap().id;
+
+        let issue = s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused", 100).unwrap();
+        s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused again", 200).unwrap();
+        s.record_error(id, "fp-b", "x is not a function", "browser", "https://x/checkout", "TypeError", 150).unwrap();
+
+        let issues = s.issues(id, false).unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].fingerprint, "fp-a", "most recent first");
+        assert_eq!(issues[0].count, 2, "occurrences are counted, not duplicated");
+        assert_eq!(issues[0].first_seen, 100);
+        assert_eq!(issues[0].last_seen, 200);
+        assert_eq!(issues[1].source, "browser");
+        assert_eq!(s.open_issue_count(id).unwrap(), 2);
+
+        // occurrences are kept per issue
+        let events = s.issue_events(issue, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events[0].message.contains("again"), "newest first");
+
+        // resolving hides it — until it happens again
+        assert!(s.resolve_issue(id, issue, true).unwrap());
+        assert_eq!(s.issues(id, false).unwrap().len(), 1);
+        assert_eq!(s.issues(id, true).unwrap().len(), 2, "resolved still listable");
+        assert_eq!(s.open_issue_count(id).unwrap(), 1);
+        s.record_error(id, "fp-a", "connection refused", "server", "app", "voltou", 300).unwrap();
+        assert_eq!(s.open_issue_count(id).unwrap(), 2, "a resolved issue that happens again reopens");
+
+        // the ingest key is stable and finds its project back
+        let key = s.ingest_key(id).unwrap();
+        assert_eq!(s.ingest_key(id).unwrap(), key, "the key never changes");
+        assert_eq!(s.project_by_ingest_key(&key).unwrap(), Some(id));
+        assert_eq!(s.project_by_ingest_key("chave-errada").unwrap(), None);
+        // stored as bookkeeping, and filtered out of the app's env file and UI
+        assert!(s.env_vars(id).unwrap().iter().any(|v| v.key.starts_with("__WEBO_")));
     }
 
     #[test]

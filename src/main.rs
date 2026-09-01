@@ -22,6 +22,8 @@ async fn main() {
     tokio::spawn(webo::logs::run(store.clone(), 10));
     // 5-minute aggregates: the 7-day charts survive webo's own deploys
     tokio::spawn(webo::persist::run(state.clone(), store.clone(), 300));
+    // hourly check, daily dump per postgres database, 7 kept
+    tokio::spawn(webo::backups::run(store.clone(), 3600));
 
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     println!("webo serving at http://{bind}");

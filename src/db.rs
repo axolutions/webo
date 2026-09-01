@@ -9,6 +9,34 @@ use futures_util::StreamExt;
 use serde::Serialize;
 
 pub const PG_IMAGE: &str = "postgres:17-alpine";
+
+/// The Postgres versions the wizard offers. Anything else falls back to 17.
+pub fn pg_image_for(version: &str) -> String {
+    let v = if matches!(version, "15" | "16" | "17") { version } else { "17" };
+    format!("postgres:{v}-alpine")
+}
+
+/// Runs a shell script in a postgres-image helper on the app network, with
+/// the shared backups volume mounted — pg_dump/pg_restore write there and
+/// webo reads the files back directly.
+pub async fn run_pg_helper(network: &str, script: &str, prefix: &str) -> Result<String, String> {
+    let docker = Docker::connect_with_unix_defaults().map_err(|e| e.to_string())?;
+    run_helper(
+        &docker,
+        Config {
+            image: Some(PG_IMAGE.to_string()),
+            cmd: Some(vec!["sh".into(), "-c".into(), script.to_string()]),
+            host_config: Some(bollard::models::HostConfig {
+                binds: Some(vec!["webo-backups:/backups".to_string()]),
+                network_mode: Some(network.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        &helper_name(prefix),
+    )
+    .await
+}
 const SQLITE_IMAGE: &str = "alpine:3";
 const SQLITE_MAGIC: &[u8] = b"SQLite format 3\0";
 
@@ -164,15 +192,16 @@ fn helper_name(prefix: &str) -> String {
 }
 
 /// Creates the project's Postgres container (idempotent) and waits for it.
-pub async fn create_postgres(slug: &str, network: &str) -> Result<Database, String> {
+pub async fn create_postgres(slug: &str, network: &str, version: &str) -> Result<Database, String> {
     let docker = Docker::connect_with_unix_defaults().map_err(|e| e.to_string())?;
+    let image = pg_image_for(version);
     let ident = pg_ident(slug);
     let container = format!("{slug}-db");
     let password = generate_password();
     let volume = format!("{slug}-db-data");
 
     let config = Config {
-        image: Some(PG_IMAGE.to_string()),
+        image: Some(image.clone()),
         env: Some(vec![
             format!("POSTGRES_DB={ident}"),
             format!("POSTGRES_USER={ident}"),
@@ -193,7 +222,7 @@ pub async fn create_postgres(slug: &str, network: &str) -> Result<Database, Stri
         }),
         ..Default::default()
     };
-    ensure_image(&docker, PG_IMAGE).await?;
+    ensure_image(&docker, &image).await?;
     let opts = CreateContainerOptions { name: container.clone(), platform: None };
     match docker.create_container(Some(opts), config).await {
         Ok(_) => {}
@@ -487,6 +516,14 @@ mod tests {
     }
 
     #[test]
+    fn pg_image_is_pinned_to_known_versions() {
+        assert_eq!(pg_image_for("17"), "postgres:17-alpine");
+        assert_eq!(pg_image_for("15"), "postgres:15-alpine");
+        assert_eq!(pg_image_for("9"), "postgres:17-alpine", "unknown falls back");
+        assert_eq!(pg_image_for("17; rm -rf /"), "postgres:17-alpine", "never interpolated raw");
+    }
+
+    #[test]
     fn passwords_are_url_safe_and_unique() {
         let a = generate_password();
         assert_eq!(a.len(), 32);
@@ -541,7 +578,7 @@ mod tests {
         let net = format!("{slug}-net");
         let _ = std::process::Command::new("docker").args(["network", "create", &net]).output();
 
-        let db = create_postgres(&slug, &net).await.expect("database created");
+        let db = create_postgres(&slug, &net, "17").await.expect("database created");
         assert_eq!(db.kind, "postgres");
         assert_eq!(db.container.as_deref(), Some(format!("{slug}-db").as_str()));
         assert!(db.persisted);
@@ -554,7 +591,7 @@ mod tests {
         assert!(url.contains(&format!("@{slug}-db:5432/")));
 
         // a second attempt must not clobber the first
-        assert!(create_postgres(&slug, &net).await.is_err(), "creating twice is refused");
+        assert!(create_postgres(&slug, &net, "17").await.is_err(), "creating twice is refused");
 
         // write mode does the work, read mode sees it
         let out = pg_query(&db, &net, "CREATE TABLE t (id int, name text); INSERT INTO t VALUES (1, 'webo');", true)

@@ -1,6 +1,6 @@
 use crate::metrics::State;
 use crate::store::Store;
-use crate::{cloudflare, github, projects, scaffold};
+use crate::{cloudflare, db, github, projects, scaffold};
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
@@ -33,6 +33,10 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}", get(project_detail).delete(project_delete))
         .route("/api/v1/projects/{slug}/provision", axum::routing::post(project_provision))
         .route("/api/v1/projects/{slug}/domain", axum::routing::put(domain_connect).delete(domain_disconnect))
+        .route("/api/v1/projects/{slug}/database", get(database_get).post(database_create).delete(database_drop))
+        .route("/api/v1/projects/{slug}/database/tables", get(database_tables))
+        .route("/api/v1/projects/{slug}/database/query", axum::routing::post(database_query))
+        .route("/api/v1/projects/{slug}/env", get(env_list).put(env_set).delete(env_delete))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
 }
@@ -522,6 +526,266 @@ async fn domain_disconnect(
     Json(serde_json::json!({ "disconnected": true })).into_response()
 }
 
+// ---------- databases and environment variables ----------
+
+fn app_network() -> String {
+    std::env::var("WEBO_APP_NETWORK").unwrap_or_else(|_| "homelab".into())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Writes the project's variables into ~/apps/<slug>/.env on the server, which
+/// the compose files already read through `env_file`.
+async fn materialize_env(api: &Api, slug: &str) -> Result<(), String> {
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else { return Err("project not found".into()) };
+    let vars = api.store.env_vars(p.id).map_err(|e| e.to_string())?;
+    let body: String = vars.iter().map(|v| format!("{}={}\n", v.key, v.value)).collect();
+    let app = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("mkdir -p ~/apps/{app} && cat > ~/apps/{app}/.env"))
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        child.stdin.as_mut().ok_or("no stdin")?.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+        child.wait().map_err(|e| e.to_string())?;
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn database_get(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let stored = api.store.database(p.id).ok().flatten();
+    // no managed database? a SQLite file may still be sitting in a volume
+    let db = match stored {
+        Some(d) => Some(d),
+        None => {
+            let found = db::detect_sqlite(&p.compose_project.clone().unwrap_or_else(|| p.slug.clone())).await;
+            if let Some(d) = &found {
+                let _ = api.store.set_database(p.id, d);
+            }
+            found
+        }
+    };
+    Json(serde_json::json!({ "database": db })).into_response()
+}
+
+async fn database_create(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if api.store.database(p.id).ok().flatten().is_some() {
+        return err(StatusCode::CONFLICT, "this project already has a database");
+    }
+    let compose = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
+    match db::create_postgres(&compose, &app_network()).await {
+        Ok(mut database) => {
+            database.created_at = now_secs();
+            let url = db::database_url(
+                database.username.as_deref().unwrap_or_default(),
+                database.password.as_deref().unwrap_or_default(),
+                database.container.as_deref().unwrap_or_default(),
+                database.db_name.as_deref().unwrap_or_default(),
+            );
+            let _ = api.store.set_database(p.id, &database);
+            let _ = api.store.set_env(p.id, "DATABASE_URL", &url, true);
+            let materialized = materialize_env(&api, &slug).await.is_ok();
+            Json(serde_json::json!({
+                "database": database,
+                "env_written": materialized,
+                "restart_needed": true,
+            }))
+            .into_response()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn database_drop(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let Some(database) = api.store.database(p.id).ok().flatten() else {
+        return err(StatusCode::NOT_FOUND, "project has no database");
+    };
+    if database.kind == "postgres" {
+        if let Some(c) = database.container.as_deref() {
+            let _ = db::drop_postgres(c, database.volume.as_deref()).await;
+        }
+    }
+    let _ = api.store.delete_database(p.id);
+    let _ = api.store.delete_env(p.id, "DATABASE_URL");
+    Json(serde_json::json!({ "dropped": true })).into_response()
+}
+
+async fn run_sql(api: &Api, slug: &str, sql: &str, write: bool) -> Result<String, (StatusCode, String)> {
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
+    };
+    let Some(database) = api.store.database(p.id).ok().flatten() else {
+        return Err((StatusCode::NOT_FOUND, "project has no database".into()));
+    };
+    let out = if database.kind == "postgres" {
+        db::pg_query(&database, &app_network(), sql, write).await
+    } else {
+        db::sqlite_query(&database, sql, write).await
+    };
+    out.map_err(|e| (StatusCode::BAD_GATEWAY, e))
+}
+
+async fn database_tables(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let Some(database) = api.store.database(p.id).ok().flatten() else {
+        return err(StatusCode::NOT_FOUND, "project has no database");
+    };
+    let sql = if database.kind == "postgres" {
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name"
+    } else {
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    };
+    match run_sql(&api, &slug, sql, false).await {
+        Ok(out) => {
+            let parsed = db::parse_table_output(&out, 500);
+            let tables: Vec<String> = parsed.rows.iter().filter_map(|r| r.first().cloned()).collect();
+            Json(serde_json::json!({ "kind": database.kind, "tables": tables })).into_response()
+        }
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+#[derive(Deserialize)]
+struct QueryReq {
+    sql: String,
+    #[serde(default)]
+    write: bool,
+}
+
+async fn database_query(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<QueryReq>,
+) -> impl IntoResponse {
+    let sql = req.sql.trim().to_string();
+    if sql.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "empty statement");
+    }
+    if db::is_write_statement(&sql) && !req.write {
+        return err(StatusCode::FORBIDDEN, "this statement changes data — turn write mode on");
+    }
+    match run_sql(&api, &slug, &sql, req.write).await {
+        Ok(out) => {
+            let parsed = db::parse_table_output(&out, 200);
+            Json(serde_json::json!({
+                "columns": parsed.columns,
+                "rows": parsed.rows,
+                "row_count": parsed.row_count,
+                "truncated": parsed.truncated,
+                "raw": out.chars().take(4000).collect::<String>(),
+            }))
+            .into_response()
+        }
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+async fn env_list(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let defined = api.store.env_vars(p.id).unwrap_or_default();
+    // what the repo says it needs, so a missing one shows before the deploy breaks
+    let expected = match (p.repo_owner.clone(), p.repo_name.clone(), github_token()) {
+        (Some(owner), Some(name), Some(token)) => {
+            tokio::task::spawn_blocking(move || github::expected_env_vars(&token, &owner, &name))
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let defined_keys: Vec<&str> = defined.iter().map(|v| v.key.as_str()).collect();
+    let missing: Vec<&String> = expected.iter().filter(|k| !defined_keys.contains(&k.as_str())).collect();
+    Json(serde_json::json!({
+        "vars": defined.iter().map(|v| serde_json::json!({
+            "key": v.key,
+            "managed": v.managed,
+            "preview": mask(&v.value),
+        })).collect::<Vec<_>>(),
+        "expected": expected,
+        "missing": missing,
+    }))
+    .into_response()
+}
+
+fn mask(value: &str) -> String {
+    let n = value.chars().count();
+    if n <= 8 {
+        "•".repeat(n.max(4))
+    } else {
+        format!("{}…{}", value.chars().take(4).collect::<String>(), "•".repeat(6))
+    }
+}
+
+#[derive(Deserialize)]
+struct EnvReq {
+    key: String,
+    value: String,
+}
+
+async fn env_set(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<EnvReq>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let key = req.key.trim().to_string();
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return err(StatusCode::BAD_REQUEST, "invalid variable name");
+    }
+    if api.store.env_vars(p.id).unwrap_or_default().iter().any(|v| v.key == key && v.managed) {
+        return err(StatusCode::FORBIDDEN, "this variable is managed by webo");
+    }
+    let _ = api.store.set_env(p.id, &key, &req.value, false);
+    let written = materialize_env(&api, &slug).await.is_ok();
+    Json(serde_json::json!({ "key": key, "env_written": written, "restart_needed": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct EnvKey {
+    key: String,
+}
+
+async fn env_delete(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Query(q): Query<EnvKey>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let removed = api.store.delete_env(p.id, &q.key).unwrap_or(false);
+    if !removed {
+        return err(StatusCode::FORBIDDEN, "managed variables go with their database");
+    }
+    let _ = materialize_env(&api, &slug).await;
+    Json(serde_json::json!({ "deleted": true })).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,6 +1036,99 @@ mod tests {
         assert_eq!(json["deleted"], true);
         assert!(api.store.project_by_slug("codo").unwrap().is_none());
         assert!(!api.state.read().await.projects_live.contains_key("codo"));
+    }
+
+    #[tokio::test]
+    async fn env_endpoints_guard_managed_vars_and_names() {
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        api.store.set_env(id, "DATABASE_URL", "postgres://u:p@h:5432/d", true).unwrap();
+
+        // listing masks values and never leaks the secret
+        let (status, json) = get_json("/api/v1/projects/codo/env").await;
+        assert_eq!(status, StatusCode::OK);
+        let body = json.to_string();
+        assert!(!body.contains("postgres://u:p"), "value never leaves the server");
+
+        let put = |api: Api, body: &str| {
+            let body = body.to_string();
+            async move {
+                app(api)
+                    .oneshot(
+                        Request::builder()
+                            .method("PUT")
+                            .uri("/api/v1/projects/codo/env")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        // a managed variable cannot be overwritten by hand
+        let res = put(api.clone(), r#"{"key":"DATABASE_URL","value":"x"}"#).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        // nor deleted
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/projects/codo/env?key=DATABASE_URL")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        // invalid names are refused
+        let res = put(api.clone(), r#"{"key":"minha chave","value":"x"}"#).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn query_refuses_writes_unless_write_mode_is_on() {
+        let api = api_with_data();
+        let post = |api: Api, body: &str| {
+            let body = body.to_string();
+            async move {
+                app(api)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/projects/codo/database/query")
+                            .header("content-type", "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let res = post(api.clone(), r#"{"sql":"DELETE FROM users","write":false}"#).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let bytes = to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("write mode"));
+
+        // empty input is refused before touching anything
+        let res = post(api.clone(), r#"{"sql":"   "}"#).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        // a read on a project without a database says so plainly
+        let res = post(api.clone(), r#"{"sql":"SELECT 1"}"#).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn database_endpoints_404_for_unknown_project() {
+        let (status, _) = get_json("/api/v1/projects/nope/database/tables").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let res = app(api_with_data())
+            .oneshot(Request::builder().method("DELETE").uri("/api/v1/projects/nope/database").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

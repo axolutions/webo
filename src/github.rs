@@ -117,6 +117,69 @@ pub fn tech_from_languages(json: &serde_json::Value) -> Option<String> {
     })
 }
 
+/// Environment variables a repo says it needs: `.env.example` keys, the
+/// `env("X")` calls in a Prisma schema, and `process.env.X` / `ENV["X"]` in
+/// the code. Shown as a checklist so a missing one is caught before deploy.
+pub fn parse_expected_env(env_example: Option<&str>, prisma: Option<&str>, sources: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    let mut push = |k: &str| {
+        let k = k.trim().to_string();
+        let ok = !k.is_empty()
+            && k.len() <= 64
+            && k.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && k.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        if ok && !keys.contains(&k) {
+            keys.push(k);
+        }
+    };
+    if let Some(text) = env_example {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || !line.contains('=') {
+                continue;
+            }
+            push(line.split('=').next().unwrap_or(""));
+        }
+    }
+    // take the identifier that follows, ignoring quotes and brackets — a
+    // trailing `;` or `)` must not become part of the name
+    fn ident_at(s: &str) -> &str {
+        let s = s.trim_start();
+        let s = s.strip_prefix(['(', '[']).unwrap_or(s).trim_start();
+        let s = s.strip_prefix(['"', '\'']).unwrap_or(s);
+        let end = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(s.len());
+        &s[..end]
+    }
+    let mut scan = |text: &str, marker: &str| {
+        let mut rest = text;
+        while let Some(i) = rest.find(marker) {
+            rest = &rest[i + marker.len()..];
+            push(ident_at(rest));
+        }
+    };
+    if let Some(text) = prisma {
+        scan(text, "env(");
+    }
+    for text in sources {
+        for marker in ["process.env.", "process.env[", "ENV[", "ENV.fetch(", "Deno.env.get("] {
+            scan(text, marker);
+        }
+    }
+    keys
+}
+
+/// Reads the usual suspects from the repo and returns the expected keys.
+pub fn expected_env_vars(token: &str, owner: &str, repo: &str) -> Vec<String> {
+    let example = get_file(token, owner, repo, ".env.example")
+        .or_else(|| get_file(token, owner, repo, ".env.sample"));
+    let prisma = get_file(token, owner, repo, "prisma/schema.prisma");
+    let sources: Vec<String> = ["next.config.mjs", "next.config.js", "config/database.yml", "docker-compose.yml"]
+        .iter()
+        .filter_map(|f| get_file(token, owner, repo, f))
+        .collect();
+    parse_expected_env(example.as_deref(), prisma.as_deref(), &sources)
+}
+
 /// Overridable in tests (WEBO_GITHUB_API_BASE) — production talks to github.com.
 fn api_base() -> String {
     std::env::var("WEBO_GITHUB_API_BASE").unwrap_or_else(|_| "https://api.github.com".into())
@@ -481,6 +544,21 @@ mod tests {
     fn parse_versions_tolerates_garbage() {
         assert!(parse_versions(&json!({})).is_empty());
         assert!(parse_versions(&json!([{"id": 1}])).is_empty());
+    }
+
+    #[test]
+    fn expected_env_is_read_from_the_usual_places() {
+        let example = "# comentário\nDATABASE_URL=postgres://x\nNEXT_PUBLIC_URL=\n\nnot_a_var\n";
+        let prisma = "datasource db {\n  provider = \"postgresql\"\n  url = env(\"DATABASE_URL\")\n}\n";
+        let source = vec!["const k = process.env.STRIPE_KEY; const o = process.env.OTHER_ONE;".to_string()];
+        let keys = parse_expected_env(Some(example), Some(prisma), &source);
+        assert!(keys.contains(&"DATABASE_URL".to_string()));
+        assert!(keys.contains(&"NEXT_PUBLIC_URL".to_string()));
+        assert!(keys.contains(&"STRIPE_KEY".to_string()));
+        assert!(keys.contains(&"OTHER_ONE".to_string()));
+        assert_eq!(keys.iter().filter(|k| *k == "DATABASE_URL").count(), 1, "no duplicates");
+        assert!(!keys.iter().any(|k| k.contains("not_a_var")));
+        assert!(parse_expected_env(None, None, &[]).is_empty());
     }
 
     #[test]

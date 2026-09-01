@@ -168,15 +168,62 @@ pub fn parse_expected_env(env_example: Option<&str>, prisma: Option<&str>, sourc
     keys
 }
 
-/// Reads the usual suspects from the repo and returns the expected keys.
+/// Source files worth scanning for env usage, most promising first — the
+/// variables an app reads usually live in its data/config layer.
+pub fn source_paths(tree: &serde_json::Value, limit: usize) -> Vec<String> {
+    const EXTS: [&str; 8] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".rb", ".py", ".go"];
+    const SKIP: [&str; 6] = ["node_modules/", ".next/", "dist/", "build/", "vendor/", "public/"];
+    let mut paths: Vec<String> = tree
+        .get("tree")
+        .and_then(|t| t.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("blob"))
+                .filter_map(|i| i.get("path").and_then(|p| p.as_str()).map(String::from))
+                .filter(|p| EXTS.iter().any(|e| p.ends_with(e)))
+                .filter(|p| !SKIP.iter().any(|s| p.contains(s)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let score = |p: &str| -> u8 {
+        let l = p.to_ascii_lowercase();
+        if l.contains("/db") || l.starts_with("lib/") || l.contains("database") || l.contains("prisma") {
+            0
+        } else if l.starts_with("config/") || l.contains("/api/") || l.contains("server") || l.contains("config.") {
+            1
+        } else {
+            2
+        }
+    };
+    paths.sort_by_key(|p| (score(p), p.len()));
+    paths.truncate(limit);
+    paths
+}
+
+/// Reads the repo and returns the environment variables it expects: the
+/// declared ones (`.env.example`, prisma schema) plus the ones the source
+/// actually reads.
 pub fn expected_env_vars(token: &str, owner: &str, repo: &str) -> Vec<String> {
     let example = get_file(token, owner, repo, ".env.example")
         .or_else(|| get_file(token, owner, repo, ".env.sample"));
     let prisma = get_file(token, owner, repo, "prisma/schema.prisma");
-    let sources: Vec<String> = ["next.config.mjs", "next.config.js", "config/database.yml", "docker-compose.yml"]
+    let branch = repo_info(token, owner, repo)
+        .map(|r| r.default_branch)
+        .unwrap_or_else(|| "main".into());
+    let base = api_base();
+    let tree = get(token, &format!("{base}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"));
+    let mut sources: Vec<String> = ["config/database.yml", "docker-compose.yml"]
         .iter()
         .filter_map(|f| get_file(token, owner, repo, f))
         .collect();
+    if let Some(tree) = tree {
+        for path in source_paths(&tree, 14) {
+            if let Some(text) = get_file(token, owner, repo, &path) {
+                sources.push(text);
+            }
+        }
+    }
     parse_expected_env(example.as_deref(), prisma.as_deref(), &sources)
 }
 
@@ -559,6 +606,27 @@ mod tests {
         assert_eq!(keys.iter().filter(|k| *k == "DATABASE_URL").count(), 1, "no duplicates");
         assert!(!keys.iter().any(|k| k.contains("not_a_var")));
         assert!(parse_expected_env(None, None, &[]).is_empty());
+    }
+
+    #[test]
+    fn source_paths_prefer_the_data_layer_and_skip_noise() {
+        let tree = json!({"tree": [
+            {"type": "blob", "path": "node_modules/x/index.js"},
+            {"type": "blob", "path": "components/Hero.tsx"},
+            {"type": "blob", "path": "lib/db.ts"},
+            {"type": "blob", "path": "app/api/leads/route.ts"},
+            {"type": "blob", "path": "public/logo.js"},
+            {"type": "blob", "path": "README.md"},
+            {"type": "tree", "path": "lib"}
+        ]});
+        let paths = source_paths(&tree, 10);
+        assert_eq!(paths[0], "lib/db.ts", "the data layer comes first");
+        assert!(paths.contains(&"app/api/leads/route.ts".to_string()));
+        assert!(paths.contains(&"components/Hero.tsx".to_string()));
+        assert!(!paths.iter().any(|p| p.contains("node_modules") || p.contains("public/")));
+        assert!(!paths.iter().any(|p| p.ends_with(".md")), "only source files");
+        assert_eq!(source_paths(&tree, 2).len(), 2, "the cap is respected");
+        assert!(source_paths(&json!({}), 5).is_empty());
     }
 
     #[test]

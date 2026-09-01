@@ -813,9 +813,14 @@ async fn ingest_preflight() -> impl IntoResponse {
 async fn ingest_error(
     AxumState(api): AxumState<Api>,
     AxumPath(key): AxumPath<String>,
-    Json(report): Json<errmod::BrowserReport>,
+    body: String,
 ) -> impl IntoResponse {
     let cors = [("access-control-allow-origin", "*")];
+    // the beacon sends text/plain on purpose, so the body is parsed by hand
+    let Ok(report) = serde_json::from_str::<errmod::BrowserReport>(&body) else {
+        return (StatusCode::BAD_REQUEST, cors, Json(serde_json::json!({"error": "invalid payload"})))
+            .into_response();
+    };
     let Ok(Some(project_id)) = api.store.project_by_ingest_key(&key) else {
         return (StatusCode::NOT_FOUND, cors, Json(serde_json::json!({"error": "unknown key"})))
             .into_response();
@@ -1329,7 +1334,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/ingest/{key}"))
-                    .header("content-type", "application/json")
+                    .header("content-type", "text/plain;charset=UTF-8")
                     .body(Body::from(r#"{"message":"x is not a function","kind":"TypeError","url":"https://app/checkout","stack":"at pay (a.js:1)"}"#))
                     .unwrap(),
             )
@@ -1344,7 +1349,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/ingest/chave-invalida")
-                    .header("content-type", "application/json")
+                    .header("content-type", "text/plain")
                     .body(Body::from(r#"{"message":"x"}"#))
                     .unwrap(),
             )

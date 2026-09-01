@@ -141,10 +141,14 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                 // without installing anything
                 for l in &lines {
                     if crate::errors::looks_like_error(&l.line, &l.stream) {
+                        // fingerprint the cleaned title, not the raw line: the
+                        // same bug logged by the app and by the framework must
+                        // land on one issue
+                        let title = crate::errors::title_of(&l.line);
                         let _ = store.record_error(
                             p.id,
-                            &crate::errors::fingerprint(&l.line),
-                            &crate::errors::title_of(&l.line),
+                            &crate::errors::fingerprint(&title),
+                            &title,
                             "server",
                             &l.container,
                             &l.line,

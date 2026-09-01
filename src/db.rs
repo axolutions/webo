@@ -102,8 +102,32 @@ pub fn is_write_statement(sql: &str) -> bool {
     !READ_ONLY.iter().any(|k| head.starts_with(k))
 }
 
+/// Pulls the image when the daemon does not have it yet — creating a
+/// container never pulls on its own, so a fresh server would fail with
+/// "No such image".
+async fn ensure_image(docker: &Docker, image: &str) -> Result<(), String> {
+    if docker.inspect_image(image).await.is_ok() {
+        return Ok(());
+    }
+    let mut stream = docker.create_image(
+        Some(bollard::image::CreateImageOptions {
+            from_image: image.to_string(),
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+    while let Some(item) = stream.next().await {
+        item.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Runs a command in a throwaway container and returns its combined output.
 async fn run_helper(docker: &Docker, config: Config<String>, name: &str) -> Result<String, String> {
+    if let Some(image) = config.image.as_deref() {
+        ensure_image(docker, image).await?;
+    }
     let opts = CreateContainerOptions { name: name.to_string(), platform: None };
     let created = docker.create_container(Some(opts), config).await.map_err(|e| e.to_string())?;
     let id = created.id;
@@ -163,6 +187,7 @@ pub async fn create_postgres(slug: &str, network: &str) -> Result<Database, Stri
         }),
         ..Default::default()
     };
+    ensure_image(&docker, PG_IMAGE).await?;
     let opts = CreateContainerOptions { name: container.clone(), platform: None };
     match docker.create_container(Some(opts), config).await {
         Ok(_) => {}
@@ -234,20 +259,24 @@ pub async fn pg_query(db: &Database, network: &str, sql: &str, write: bool) -> R
         return Err("database is not configured".into());
     };
     let docker = Docker::connect_with_unix_defaults().map_err(|e| e.to_string())?;
-    let guarded = if write {
-        sql.to_string()
-    } else {
-        format!("SET default_transaction_read_only = on;\n{sql}")
-    };
+    // read-only goes through PGOPTIONS: putting a SET in the script would
+    // make psql echo "SET" as the first output line, breaking the header
     let script = format!(
-        "PGPASSWORD='{pass}' psql -h {container} -U {user} -d {name} -A -F'|' -v ON_ERROR_STOP=1 <<'WEBOSQL'\n{guarded}\nWEBOSQL"
+        "PGPASSWORD='{pass}' psql -h {container} -U {user} -d {name} -A -F'|' -v ON_ERROR_STOP=1 <<'WEBOSQL'\n{sql}\nWEBOSQL"
     );
     run_helper(
         &docker,
         Config {
             image: Some(PG_IMAGE.to_string()),
             cmd: Some(vec!["sh".into(), "-c".into(), script]),
-            env: Some(vec!["PGCONNECT_TIMEOUT=10".into()]),
+            env: Some(if write {
+                vec!["PGCONNECT_TIMEOUT=10".into()]
+            } else {
+                vec![
+                    "PGCONNECT_TIMEOUT=10".into(),
+                    "PGOPTIONS=-c default_transaction_read_only=on".into(),
+                ]
+            }),
             host_config: Some(bollard::models::HostConfig {
                 network_mode: Some(network.to_string()),
                 ..Default::default()
@@ -407,6 +436,116 @@ mod tests {
         assert!(is_write_statement("INSERT INTO t VALUES (1)"));
         // a comment must not disguise a write
         assert!(is_write_statement("-- select\nDROP TABLE users"));
+    }
+
+    /// Live tests against a real docker daemon (CI runner, dev machines);
+    /// they skip silently where none is reachable.
+    fn docker_available() -> bool {
+        std::process::Command::new("docker")
+            .args(["info"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_is_created_queried_and_dropped() {
+        if !docker_available() {
+            eprintln!("docker unavailable — skipping postgres test");
+            return;
+        }
+        let slug = format!("webotest{}", std::process::id());
+        let net = format!("{slug}-net");
+        let _ = std::process::Command::new("docker").args(["network", "create", &net]).output();
+
+        let db = create_postgres(&slug, &net).await.expect("database created");
+        assert_eq!(db.kind, "postgres");
+        assert_eq!(db.container.as_deref(), Some(format!("{slug}-db").as_str()));
+        assert!(db.persisted);
+        let url = database_url(
+            db.username.as_deref().unwrap(),
+            db.password.as_deref().unwrap(),
+            db.container.as_deref().unwrap(),
+            db.db_name.as_deref().unwrap(),
+        );
+        assert!(url.contains(&format!("@{slug}-db:5432/")));
+
+        // a second attempt must not clobber the first
+        assert!(create_postgres(&slug, &net).await.is_err(), "creating twice is refused");
+
+        // write mode does the work, read mode sees it
+        let out = pg_query(&db, &net, "CREATE TABLE t (id int, name text); INSERT INTO t VALUES (1, 'webo');", true)
+            .await
+            .expect("write query");
+        assert!(!out.to_lowercase().contains("error"), "write failed: {out}");
+        let out = pg_query(&db, &net, "SELECT id, name FROM t ORDER BY id;", false).await.expect("read query");
+        let parsed = parse_table_output(&out, 10);
+        assert_eq!(parsed.columns, vec!["id", "name"]);
+        assert_eq!(parsed.rows[0], vec!["1", "webo"]);
+
+        // read-only really is read-only
+        let out = pg_query(&db, &net, "INSERT INTO t VALUES (2, 'nope');", false).await.unwrap_or_default();
+        assert!(out.to_lowercase().contains("read-only"), "a write must be refused in read mode: {out}");
+
+        drop_postgres(db.container.as_deref().unwrap(), db.volume.as_deref()).await.expect("dropped");
+        let gone = std::process::Command::new("docker")
+            .args(["inspect", &format!("{slug}-db")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(!gone, "container removed");
+        let _ = std::process::Command::new("docker").args(["network", "rm", &net]).output();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_is_detected_in_a_volume_and_queried() {
+        if !docker_available() {
+            eprintln!("docker unavailable — skipping sqlite test");
+            return;
+        }
+        use std::process::Command;
+        let slug = format!("webosqlite{}", std::process::id());
+        let vol = format!("{slug}-data");
+        let app = format!("{slug}-app");
+
+        // an app container holding a real SQLite file in its volume
+        let seed = Command::new("docker")
+            .args([
+                "run", "--rm", "-v", &format!("{vol}:/data"), "alpine:3", "sh", "-c",
+                "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/app.db \"CREATE TABLE notes (id integer, body text); INSERT INTO notes VALUES (1, 'ola');\"",
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(seed, "seeded the sqlite file");
+        let _ = Command::new("docker")
+            .args([
+                "run", "-d", "--name", &app, "--label",
+                &format!("{}={}", crate::projects::COMPOSE_LABEL, slug),
+                "-v", &format!("{vol}:/data"), "alpine:3", "sleep", "120",
+            ])
+            .output();
+
+        let found = detect_sqlite(&slug).await.expect("sqlite detected");
+        assert_eq!(found.kind, "sqlite");
+        assert_eq!(found.volume.as_deref(), Some(vol.as_str()));
+        assert_eq!(found.file_path.as_deref(), Some("/data/app.db"));
+
+        let out = sqlite_query(&found, "SELECT id, body FROM notes;", false).await.expect("query");
+        let parsed = parse_table_output(&out, 10);
+        assert_eq!(parsed.columns, vec!["id", "body"]);
+        assert_eq!(parsed.rows[0], vec!["1", "ola"]);
+
+        let _ = Command::new("docker").args(["rm", "-f", &app]).output();
+        let _ = Command::new("docker").args(["volume", "rm", "-f", &vol]).output();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn detect_sqlite_returns_none_without_a_database() {
+        if !docker_available() {
+            return;
+        }
+        assert!(detect_sqlite("webo-no-such-project").await.is_none());
     }
 
     #[test]

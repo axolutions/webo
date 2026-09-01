@@ -96,6 +96,24 @@ fn read_temperature(components: &mut Components) -> Option<f32> {
     cpu_temp.or(max_temp)
 }
 
+/// First fan the hwmon exposes, when there is one — many machines
+/// (and most VMs) simply have none, and the panel hides the number then.
+fn read_fan_rpm(base: &Path) -> Option<u32> {
+    for hw in fs::read_dir(base).ok()?.flatten() {
+        for f in fs::read_dir(hw.path()).ok().into_iter().flatten().flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            if name.starts_with("fan") && name.ends_with("_input") {
+                if let Some(rpm) = fs::read_to_string(f.path()).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
+                    if rpm > 0 {
+                        return Some(rpm);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn count_processes() -> Option<usize> {
     let entries = fs::read_dir("/proc").ok()?;
     Some(
@@ -148,6 +166,7 @@ struct ProcSample {
 struct RawProc {
     pid: u32,
     ppid: u32,
+    threads: u64,
     comm: String,
     /// First whitespace token of argv[0] — the executable path. Some apps
     /// (Firefox content processes) rewrite their cmdline into one big string,
@@ -164,6 +183,7 @@ struct StatFields {
     comm: String,
     ppid: u32,
     cpu_ticks: u64,
+    threads: u64,
     starttime: u64,
 }
 
@@ -174,7 +194,8 @@ fn parse_stat(stat: &str) -> Option<StatFields> {
     let close = stat.rfind(')')?;
     let comm = stat.get(open + 1..close)?.to_string();
     let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
-    // after the state field: ppid=rest[1], utime=rest[11], stime=rest[12], starttime=rest[19]
+    // after the state field: ppid=rest[1], utime=rest[11], stime=rest[12],
+    // num_threads=rest[17], starttime=rest[19]
     if rest.len() < 20 {
         return None;
     }
@@ -184,6 +205,7 @@ fn parse_stat(stat: &str) -> Option<StatFields> {
         comm,
         ppid: rest[1].parse().unwrap_or(0),
         cpu_ticks: utime + stime,
+        threads: rest[17].parse().unwrap_or(1),
         starttime: rest[19].parse().unwrap_or(0),
     })
 }
@@ -261,6 +283,7 @@ fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawP
         list.push(RawProc {
             pid,
             ppid: st.ppid,
+            threads: st.threads,
             comm: st.comm,
             bin,
             cmd,
@@ -315,6 +338,7 @@ fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
             cpu_pct: 0.0,
             mem_bytes: 0,
             disk_bps: 0,
+            threads: 0,
             procs: idxs.len(),
             children: Vec::new(),
         };
@@ -323,6 +347,7 @@ fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
             g.cpu_pct += p.cpu_pct;
             g.mem_bytes += p.mem_bytes;
             g.disk_bps += p.disk_bps;
+            g.threads += p.threads;
             if p.pid != root_pid {
                 g.children.push(ProcessChild {
                     pid: p.pid,
@@ -330,6 +355,7 @@ fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
                     cpu_pct: p.cpu_pct,
                     mem_bytes: p.mem_bytes,
                     disk_bps: p.disk_bps,
+                    threads: p.threads,
                     uptime_secs: p.uptime_secs,
                 });
             }
@@ -430,6 +456,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
             net_rx_bps: rx_bps,
             net_tx_bps: tx_bps,
             temp_c: read_temperature(&mut components),
+            fan_rpm: read_fan_rpm(Path::new("/sys/class/hwmon")),
             battery_pct,
             battery_limit_pct,
             battery_status,
@@ -451,6 +478,7 @@ mod tests {
         RawProc {
             pid,
             ppid,
+            threads: 2,
             comm: comm.into(),
             bin: bin.into(),
             cmd: format!("{bin} --flag"),
@@ -488,6 +516,7 @@ mod tests {
         assert_eq!(f.comm, "webo");
         assert_eq!(f.ppid, 1);
         assert_eq!(f.cpu_ticks, 300);
+        assert_eq!(f.threads, 4);
         assert_eq!(f.starttime, 12345);
     }
 
@@ -553,6 +582,31 @@ Inter-|   Receive                                                |  Transmit
         assert_eq!(limit, Some(80));
         assert_eq!(status.as_deref(), Some("Not charging"));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fan_reads_hwmon_and_absent_is_none() {
+        let dir = std::env::temp_dir().join(format!("webo-fan-test-{}", std::process::id()));
+        let hw = dir.join("hwmon5");
+        fs::create_dir_all(&hw).unwrap();
+        fs::write(hw.join("fan1_input"), "2400\n").unwrap();
+        assert_eq!(read_fan_rpm(&dir), Some(2400));
+        // a zero reading means "fan stopped", not a value worth showing
+        fs::write(hw.join("fan1_input"), "0\n").unwrap();
+        assert_eq!(read_fan_rpm(&dir), None);
+        assert_eq!(read_fan_rpm(Path::new("/nonexistent-webo-fan")), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grouping_sums_threads() {
+        let raws = vec![
+            raw(10, 1, "postgres", "/bin/postgres", 0.2, 100),
+            raw(11, 10, "postgres", "/bin/postgres", 0.1, 40),
+        ];
+        let groups = group_processes(raws);
+        assert_eq!(groups[0].threads, 4, "2 threads per proc, summed");
+        assert_eq!(groups[0].children[0].threads, 2);
     }
 
     #[test]

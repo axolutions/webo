@@ -67,10 +67,26 @@ pub struct Issue {
     pub fingerprint: String,
     pub title: String,
     pub source: String,
+    /// First stack frame's file:line, when the error carried a stack.
+    pub culprit: Option<String>,
     pub first_seen: i64,
     pub last_seen: i64,
     pub count: i64,
-    pub resolved: bool,
+    /// "open" | "resolved" | "ignored"
+    pub state: String,
+}
+
+/// One persisted metrics point (5-minute aggregate). `scope` is "server"
+/// or "project:<slug>"; the 7-day window is served from these rows, so the
+/// history survives webo's own deploys.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq)]
+pub struct StoredSample {
+    pub ts: i64,
+    pub cpu_pct: f64,
+    pub mem_bytes: i64,
+    pub disk_bps: i64,
+    pub net_rx_bps: i64,
+    pub net_tx_bps: i64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -183,6 +199,8 @@ CREATE TABLE IF NOT EXISTS issues (
     last_seen INTEGER NOT NULL,
     count INTEGER NOT NULL DEFAULT 0,
     resolved INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'open',
+    culprit TEXT,
     UNIQUE (project_id, fingerprint)
 );
 CREATE INDEX IF NOT EXISTS idx_issues_project ON issues (project_id, last_seen DESC);
@@ -201,6 +219,18 @@ CREATE TABLE IF NOT EXISTS env_vars (
     managed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, key)
 );
+-- 5-minute metric aggregates: the 7-day charts read from here
+CREATE TABLE IF NOT EXISTS samples (
+    scope TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    cpu_pct REAL NOT NULL DEFAULT 0,
+    mem_bytes INTEGER NOT NULL DEFAULT 0,
+    disk_bps INTEGER NOT NULL DEFAULT 0,
+    net_rx_bps INTEGER NOT NULL DEFAULT 0,
+    net_tx_bps INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_samples_scope ON samples (scope, ts DESC);
 ";
 
 /// Additive migrations for databases created by older versions —
@@ -212,6 +242,10 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN auto_domain TEXT", []);
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN custom_domain TEXT", []);
     let _ = conn.execute("ALTER TABLE projects ADD COLUMN port INTEGER", []);
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN state TEXT NOT NULL DEFAULT 'open'", []);
+    let _ = conn.execute("ALTER TABLE issues ADD COLUMN culprit TEXT", []);
+    // databases from before the state column carried resolution as a flag
+    let _ = conn.execute("UPDATE issues SET state = 'resolved' WHERE resolved = 1 AND state = 'open'", []);
 }
 
 impl Store {
@@ -507,6 +541,7 @@ impl Store {
     /// Records one occurrence: creates the issue on first sight, otherwise
     /// bumps its count and last_seen. A resolved issue that happens again
     /// comes back open — it clearly was not fixed.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_error(
         &self,
         project_id: i64,
@@ -516,17 +551,22 @@ impl Store {
         origin: &str,
         message: &str,
         ts: i64,
+        culprit: Option<&str>,
     ) -> rusqlite::Result<i64> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        // a resolved issue that happens again reopens (it was not fixed);
+        // an IGNORED one stays ignored — that is what ignoring means
         tx.execute(
-            "INSERT INTO issues (project_id, fingerprint, title, source, first_seen, last_seen, count, resolved)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, 0)
+            "INSERT INTO issues (project_id, fingerprint, title, source, first_seen, last_seen, count, resolved, state, culprit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, 1, 0, 'open', ?6)
              ON CONFLICT (project_id, fingerprint) DO UPDATE SET
                 last_seen = MAX(issues.last_seen, excluded.last_seen),
                 count = issues.count + 1,
-                resolved = 0",
-            params![project_id, fingerprint, title, source, ts],
+                resolved = CASE WHEN issues.state = 'ignored' THEN issues.resolved ELSE 0 END,
+                state = CASE WHEN issues.state = 'ignored' THEN 'ignored' ELSE 'open' END,
+                culprit = COALESCE(issues.culprit, excluded.culprit)",
+            params![project_id, fingerprint, title, source, ts, culprit],
         )?;
         let id: i64 = tx.query_row(
             "SELECT id FROM issues WHERE project_id = ?1 AND fingerprint = ?2",
@@ -548,32 +588,90 @@ impl Store {
         Ok(id)
     }
 
-    pub fn issues(&self, project_id: i64, include_resolved: bool) -> rusqlite::Result<Vec<Issue>> {
+    /// Issues filtered by state; `None` lists everything.
+    pub fn issues(&self, project_id: i64, state: Option<&str>) -> rusqlite::Result<Vec<Issue>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, fingerprint, title, source, first_seen, last_seen, count, resolved
-             FROM issues WHERE project_id = ?1 AND (?2 = 1 OR resolved = 0)
+            "SELECT id, fingerprint, title, source, culprit, first_seen, last_seen, count, state
+             FROM issues WHERE project_id = ?1 AND (?2 IS NULL OR state = ?2)
              ORDER BY last_seen DESC LIMIT 200",
         )?;
-        let rows = stmt.query_map(params![project_id, include_resolved as i64], |r| {
+        let rows = stmt.query_map(params![project_id, state], |r| {
             Ok(Issue {
                 id: r.get(0)?,
                 fingerprint: r.get(1)?,
                 title: r.get(2)?,
                 source: r.get(3)?,
-                first_seen: r.get(4)?,
-                last_seen: r.get(5)?,
-                count: r.get(6)?,
-                resolved: r.get::<_, i64>(7)? != 0,
+                culprit: r.get(4)?,
+                first_seen: r.get(5)?,
+                last_seen: r.get(6)?,
+                count: r.get(7)?,
+                state: r.get(8)?,
             })
         })?;
         rows.collect()
     }
 
+    /// (open, resolved, ignored) counts for the header chips.
+    pub fn issue_counts(&self, project_id: i64) -> rusqlite::Result<(i64, i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT
+                COALESCE(SUM(state = 'open'), 0),
+                COALESCE(SUM(state = 'resolved'), 0),
+                COALESCE(SUM(state = 'ignored'), 0)
+             FROM issues WHERE project_id = ?1",
+            params![project_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+    }
+
+    /// Bulk state change; returns how many rows changed.
+    pub fn set_issue_state(&self, project_id: i64, ids: &[i64], state: &str) -> rusqlite::Result<usize> {
+        if !matches!(state, "open" | "resolved" | "ignored") || ids.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut changed = 0;
+        for id in ids {
+            changed += conn.execute(
+                "UPDATE issues SET state = ?1, resolved = (?1 = 'resolved') WHERE id = ?2 AND project_id = ?3",
+                params![state, id, project_id],
+            )?;
+        }
+        Ok(changed)
+    }
+
+    /// Deletes issues and their events (CASCADE); returns how many went.
+    pub fn delete_issues(&self, project_id: i64, ids: &[i64]) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut removed = 0;
+        for id in ids {
+            removed += conn.execute(
+                "DELETE FROM issues WHERE id = ?1 AND project_id = ?2",
+                params![id, project_id],
+            )?;
+        }
+        Ok(removed)
+    }
+
+    /// Timestamps of the stored occurrences, oldest first — the per-issue
+    /// sparkline is drawn from these.
+    pub fn event_timestamps(&self, issue_id: i64, limit: usize) -> rusqlite::Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts FROM error_events WHERE issue_id = ?1 ORDER BY ts DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![issue_id, limit as i64], |r| r.get::<_, i64>(0))?;
+        let mut out: Vec<i64> = rows.collect::<Result<_, _>>()?;
+        out.reverse();
+        Ok(out)
+    }
+
     pub fn open_issue_count(&self, project_id: i64) -> rusqlite::Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT COUNT(*) FROM issues WHERE project_id = ?1 AND resolved = 0",
+            "SELECT COUNT(*) FROM issues WHERE project_id = ?1 AND state = 'open'",
             params![project_id],
             |r| r.get(0),
         )
@@ -591,11 +689,47 @@ impl Store {
     }
 
     pub fn resolve_issue(&self, project_id: i64, issue_id: i64, resolved: bool) -> rusqlite::Result<bool> {
+        Ok(self.set_issue_state(project_id, &[issue_id], if resolved { "resolved" } else { "open" })? > 0)
+    }
+
+    // ---------- persisted metric samples (the 7-day window) ----------
+
+    pub fn insert_sample(&self, scope: &str, s: &StoredSample) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.execute(
-            "UPDATE issues SET resolved = ?1 WHERE id = ?2 AND project_id = ?3",
-            params![resolved as i64, issue_id, project_id],
-        )? > 0)
+        conn.execute(
+            "INSERT INTO samples (scope, ts, cpu_pct, mem_bytes, disk_bps, net_rx_bps, net_tx_bps)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (scope, ts) DO UPDATE SET
+                cpu_pct = excluded.cpu_pct, mem_bytes = excluded.mem_bytes,
+                disk_bps = excluded.disk_bps, net_rx_bps = excluded.net_rx_bps,
+                net_tx_bps = excluded.net_tx_bps",
+            params![scope, s.ts, s.cpu_pct, s.mem_bytes, s.disk_bps, s.net_rx_bps, s.net_tx_bps],
+        )?;
+        Ok(())
+    }
+
+    pub fn samples(&self, scope: &str, since: i64) -> rusqlite::Result<Vec<StoredSample>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ts, cpu_pct, mem_bytes, disk_bps, net_rx_bps, net_tx_bps
+             FROM samples WHERE scope = ?1 AND ts >= ?2 ORDER BY ts ASC LIMIT 4032",
+        )?;
+        let rows = stmt.query_map(params![scope, since], |r| {
+            Ok(StoredSample {
+                ts: r.get(0)?,
+                cpu_pct: r.get(1)?,
+                mem_bytes: r.get(2)?,
+                disk_bps: r.get(3)?,
+                net_rx_bps: r.get(4)?,
+                net_tx_bps: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn prune_samples(&self, before: i64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM samples WHERE ts < ?1", params![before])
     }
 
     /// The ingest key a project's browser snippet carries. Created on demand.
@@ -879,30 +1013,33 @@ mod tests {
         s.upsert_discovered("app", "app", None, None, 1).unwrap();
         let id = s.project_by_slug("app").unwrap().unwrap().id;
 
-        let issue = s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused", 100).unwrap();
-        s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused again", 200).unwrap();
-        s.record_error(id, "fp-b", "x is not a function", "browser", "https://x/checkout", "TypeError", 150).unwrap();
+        let issue = s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused", 100, Some("lib/db.ts:12")).unwrap();
+        s.record_error(id, "fp-a", "connection refused", "server", "app", "ERROR connection refused again", 200, None).unwrap();
+        s.record_error(id, "fp-b", "x is not a function", "browser", "https://x/checkout", "TypeError", 150, None).unwrap();
 
-        let issues = s.issues(id, false).unwrap();
+        let issues = s.issues(id, Some("open")).unwrap();
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].fingerprint, "fp-a", "most recent first");
         assert_eq!(issues[0].count, 2, "occurrences are counted, not duplicated");
         assert_eq!(issues[0].first_seen, 100);
         assert_eq!(issues[0].last_seen, 200);
+        assert_eq!(issues[0].culprit.as_deref(), Some("lib/db.ts:12"), "first culprit sticks");
         assert_eq!(issues[1].source, "browser");
         assert_eq!(s.open_issue_count(id).unwrap(), 2);
 
-        // occurrences are kept per issue
+        // occurrences are kept per issue, and their timestamps drive the spark
         let events = s.issue_events(issue, 10).unwrap();
         assert_eq!(events.len(), 2);
         assert!(events[0].message.contains("again"), "newest first");
+        assert_eq!(s.event_timestamps(issue, 10).unwrap(), vec![100, 200], "oldest first");
 
         // resolving hides it — until it happens again
         assert!(s.resolve_issue(id, issue, true).unwrap());
-        assert_eq!(s.issues(id, false).unwrap().len(), 1);
-        assert_eq!(s.issues(id, true).unwrap().len(), 2, "resolved still listable");
+        assert_eq!(s.issues(id, Some("open")).unwrap().len(), 1);
+        assert_eq!(s.issues(id, None).unwrap().len(), 2, "resolved still listable");
+        assert_eq!(s.issue_counts(id).unwrap(), (1, 1, 0));
         assert_eq!(s.open_issue_count(id).unwrap(), 1);
-        s.record_error(id, "fp-a", "connection refused", "server", "app", "voltou", 300).unwrap();
+        s.record_error(id, "fp-a", "connection refused", "server", "app", "voltou", 300, None).unwrap();
         assert_eq!(s.open_issue_count(id).unwrap(), 2, "a resolved issue that happens again reopens");
 
         // the ingest key is stable and finds its project back
@@ -1104,6 +1241,87 @@ mod tests {
             branch: "main".into(), duration_secs: 1, created_at: 1,
         }]).unwrap();
         assert_eq!(s.builds(id, 10).unwrap()[0].workflow, "Deploy");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ignored_issues_stay_ignored_and_bulk_actions_work() {
+        let s = store();
+        s.upsert_discovered("app", "app", None, None, 1).unwrap();
+        let id = s.project_by_slug("app").unwrap().unwrap().id;
+        let i1 = s.record_error(id, "fp-1", "a", "server", "app", "a", 10, None).unwrap();
+        let i2 = s.record_error(id, "fp-2", "b", "server", "app", "b", 20, None).unwrap();
+        let i3 = s.record_error(id, "fp-3", "c", "browser", "u", "c", 30, None).unwrap();
+
+        // ignoring silences even new occurrences
+        assert_eq!(s.set_issue_state(id, &[i1], "ignored").unwrap(), 1);
+        s.record_error(id, "fp-1", "a", "server", "app", "a de novo", 40, None).unwrap();
+        let ign = s.issues(id, Some("ignored")).unwrap();
+        assert_eq!(ign.len(), 1);
+        assert_eq!(ign[0].count, 2, "occurrences still counted while ignored");
+        assert_eq!(s.open_issue_count(id).unwrap(), 2, "ignored is not open");
+
+        // bulk resolve + counts
+        assert_eq!(s.set_issue_state(id, &[i2, i3], "resolved").unwrap(), 2);
+        assert_eq!(s.issue_counts(id).unwrap(), (0, 2, 1));
+        // invalid state and empty list are no-ops
+        assert_eq!(s.set_issue_state(id, &[i2], "weird").unwrap(), 0);
+        assert_eq!(s.set_issue_state(id, &[], "open").unwrap(), 0);
+
+        // delete takes the events along
+        assert_eq!(s.delete_issues(id, &[i1, 9999]).unwrap(), 1);
+        assert!(s.event_timestamps(i1, 10).unwrap().is_empty());
+        assert_eq!(s.issues(id, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn samples_persist_upsert_and_prune() {
+        let s = store();
+        let mk = |ts| StoredSample { ts, cpu_pct: 1.5, mem_bytes: 100, disk_bps: 10, net_rx_bps: 5, net_tx_bps: 3 };
+        s.insert_sample("server", &mk(100)).unwrap();
+        s.insert_sample("server", &mk(400)).unwrap();
+        s.insert_sample("project:app", &mk(100)).unwrap();
+        // same (scope, ts) updates in place
+        s.insert_sample("server", &StoredSample { cpu_pct: 9.0, ..mk(400) }).unwrap();
+
+        let got = s.samples("server", 0).unwrap();
+        assert_eq!(got.len(), 2, "scopes are isolated");
+        assert_eq!(got[0].ts, 100, "oldest first");
+        assert_eq!(got[1].cpu_pct, 9.0, "upsert replaced the point");
+
+        let recent = s.samples("server", 200).unwrap();
+        assert_eq!(recent.len(), 1);
+
+        assert_eq!(s.prune_samples(200).unwrap(), 2, "old points of every scope go");
+        assert_eq!(s.samples("project:app", 0).unwrap().len(), 0);
+        assert_eq!(s.samples("server", 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_maps_old_resolved_flag_to_state() {
+        let dir = std::env::temp_dir().join(format!("webo-issue-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, server_id TEXT NOT NULL DEFAULT 'local',
+                    slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, source TEXT NOT NULL,
+                    compose_project TEXT, repo_owner TEXT, repo_name TEXT, domain TEXT, created_at INTEGER NOT NULL);
+                 CREATE TABLE issues (id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL, title TEXT NOT NULL, source TEXT NOT NULL,
+                    first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0, resolved INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE (project_id, fingerprint));
+                 INSERT INTO projects (id, slug, name, source, created_at) VALUES (7, 'app', 'app', 'discovered', 1);
+                 INSERT INTO issues (project_id, fingerprint, title, source, first_seen, last_seen, count, resolved)
+                    VALUES (7, 'f1', 'old resolved', 'server', 1, 2, 3, 1),
+                           (7, 'f2', 'old open', 'server', 1, 2, 1, 0);",
+            ).unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.issues(7, Some("resolved")).unwrap().len(), 1);
+        assert_eq!(s.issues(7, Some("open")).unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 

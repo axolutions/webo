@@ -33,6 +33,54 @@ pub struct ErrorEvent {
     pub ts: i64,
 }
 
+/// Log level, derived from the line itself — nothing is stored for this,
+/// the heuristic is cheap enough to run at read time.
+pub fn level_of(line: &str, stream: &str) -> &'static str {
+    if looks_like_error(line, stream) {
+        return "error";
+    }
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("warn") || lower.contains("deprecat") {
+        "warn"
+    } else {
+        "info"
+    }
+}
+
+/// Does this line belong to the stack of the error above it?
+pub fn is_stack_frame(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("at ") || t.starts_with("File \"") || t.starts_with("Caused by")
+        || t.starts_with("from ") && line.starts_with(' ')
+}
+
+/// First stack frame's location — the file to blame, when the error carried
+/// a stack. `at handler (app/api/route.ts:31:5)` → `app/api/route.ts:31:5`.
+pub fn culprit_of(message: &str) -> Option<String> {
+    for line in message.lines().skip(1) {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("at ") {
+            let place = match (rest.rfind('('), rest.rfind(')')) {
+                (Some(a), Some(b)) if a < b => &rest[a + 1..b],
+                _ => rest,
+            };
+            let place = place.trim();
+            if !place.is_empty() {
+                return Some(place.chars().take(160).collect());
+            }
+        }
+        if let Some(rest) = t.strip_prefix("File \"") {
+            let file = rest.split('"').next().unwrap_or(rest);
+            let line_no = rest.split("line ").nth(1).and_then(|x| x.split([',', ' ']).next());
+            return Some(match line_no {
+                Some(n) => format!("{file}:{n}"),
+                None => file.to_string(),
+            });
+        }
+    }
+    None
+}
+
 /// Is this log line an error?
 pub fn looks_like_error(line: &str, stream: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -205,6 +253,33 @@ mod tests {
             fingerprint(&title_of(framework)),
             "one bug, one issue"
         );
+    }
+
+    #[test]
+    fn levels_are_derived_not_stored() {
+        assert_eq!(level_of("ERROR: boom", "stderr"), "error");
+        assert_eq!(level_of("WARN cache miss em leads:sp", "stdout"), "warn");
+        assert_eq!(level_of("DeprecationWarning: punycode", "stdout"), "warn");
+        assert_eq!(level_of("GET /health 200", "stdout"), "info");
+        assert_eq!(level_of("listening on :3000", "stderr"), "info");
+    }
+
+    #[test]
+    fn stack_frames_are_recognized_and_blamed() {
+        assert!(is_stack_frame("    at w (.next/server/app/api/quebra/route.js:1:823)"));
+        assert!(is_stack_frame("  File \"/app/main.py\", line 3, in <module>"));
+        assert!(!is_stack_frame("GET / 200"));
+        assert!(!is_stack_frame("TypeError: x"));
+
+        let msg = "TypeError: Cannot read properties of null (reading 'valor')\n    at w (.next/server/app/api/quebra/route.js:1:823)\n    at async (node:internal)";
+        assert_eq!(culprit_of(msg).as_deref(), Some(".next/server/app/api/quebra/route.js:1:823"));
+
+        let py = "Traceback (most recent call last):\n  File \"/app/main.py\", line 3, in <module>\n    boom()";
+        assert_eq!(culprit_of(py).as_deref(), Some("/app/main.py:3"));
+
+        assert_eq!(culprit_of("erro sem stack"), None);
+        // frame without parens still yields a place
+        assert_eq!(culprit_of("x\n    at db.ts:1:2").as_deref(), Some("db.ts:1:2"));
     }
 
     #[test]

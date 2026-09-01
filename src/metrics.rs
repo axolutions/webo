@@ -29,6 +29,8 @@ pub struct Snapshot {
     pub net_rx_bps: u64,
     pub net_tx_bps: u64,
     pub temp_c: Option<f32>,
+    /// Fan speed, only when the machine's hwmon exposes one.
+    pub fan_rpm: Option<u32>,
     pub battery_pct: Option<u8>,
     pub battery_limit_pct: Option<u8>,
     pub battery_status: Option<String>,
@@ -44,6 +46,7 @@ pub struct ProcessChild {
     pub cpu_pct: f32,
     pub mem_bytes: u64,
     pub disk_bps: u64,
+    pub threads: u64,
     pub uptime_secs: u64,
 }
 
@@ -61,8 +64,21 @@ pub struct ProcessGroup {
     pub cpu_pct: f32,
     pub mem_bytes: u64,
     pub disk_bps: u64,
+    pub threads: u64,
     pub procs: usize,
     pub children: Vec<ProcessChild>,
+}
+
+/// Docker's own footprint on the disk — fed by `docker system df`.
+#[derive(Clone, Copy, Default, Serialize)]
+pub struct DockerInfo {
+    pub images: usize,
+    pub images_bytes: u64,
+    pub volumes: usize,
+    pub volumes_bytes: u64,
+    /// Space `docker system prune` would give back (dangling images +
+    /// unreferenced volumes).
+    pub reclaimable_bytes: u64,
 }
 
 /// Facts that rarely change — a separate endpoint so automations can answer
@@ -89,6 +105,7 @@ pub struct ProjectContainer {
     pub role: String,
     pub image: String,
     pub state: String,
+    pub restarts: i64,
     pub uptime_secs: u64,
     pub cpu_pct: f32,
     pub mem_bytes: u64,
@@ -125,6 +142,7 @@ pub struct State {
     pub history: VecDeque<Sample>,
     pub history_cap: usize,
     pub processes: Vec<ProcessGroup>,
+    pub docker: DockerInfo,
     pub projects_live: std::collections::HashMap<String, ProjectLive>,
 }
 
@@ -136,6 +154,7 @@ impl State {
             history: VecDeque::with_capacity(history_cap),
             history_cap,
             processes: Vec::new(),
+            docker: DockerInfo::default(),
             projects_live: std::collections::HashMap::new(),
         }
     }

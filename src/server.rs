@@ -40,7 +40,10 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}/env/{key}", get(env_reveal))
         .route("/api/v1/projects/{slug}/logs", get(project_logs))
         .route("/api/v1/projects/{slug}/errors", get(project_errors))
-        .route("/api/v1/projects/{slug}/errors/{id}", get(issue_detail).put(issue_resolve))
+        .route("/api/v1/projects/{slug}/errors/bulk", axum::routing::post(issues_bulk))
+        .route("/api/v1/projects/{slug}/errors/{id}", get(issue_detail).put(issue_resolve).delete(issue_delete))
+        .route("/api/v1/projects/{slug}/history", get(project_history))
+        .route("/api/v1/docker", get(docker_info))
         .route("/api/v1/ingest/{key}", axum::routing::post(ingest_error).options(ingest_preflight))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
@@ -70,19 +73,54 @@ async fn processes(AxumState(api): AxumState<Api>) -> impl IntoResponse {
 struct HistoryQuery {
     /// window in minutes (default: 24 h)
     minutes: Option<u64>,
+    /// "7d" switches to the persisted 5-minute aggregates
+    window: Option<String>,
 }
 
 async fn history(
     AxumState(api): AxumState<Api>,
     Query(q): Query<HistoryQuery>,
 ) -> impl IntoResponse {
+    if q.window.as_deref() == Some("7d") {
+        let since = now_secs() - crate::persist::KEEP_SECS;
+        let rows = api.store.samples("server", since).unwrap_or_default();
+        // same JSON keys as the live samples, so the front draws either
+        let mapped: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|s| serde_json::json!({
+                "ts": s.ts, "cpu_pct": s.cpu_pct, "mem_used": s.mem_bytes,
+                "net_rx_bps": s.net_rx_bps, "net_tx_bps": s.net_tx_bps,
+            }))
+            .collect();
+        return Json(serde_json::json!(mapped)).into_response();
+    }
     let st = api.state.read().await;
     let cutoff = q
         .minutes
         .map(|m| st.snapshot.ts.saturating_sub(m * 60))
         .unwrap_or(0);
     let samples: Vec<_> = st.history.iter().filter(|s| s.ts >= cutoff).copied().collect();
-    Json(samples)
+    Json(serde_json::json!(samples)).into_response()
+}
+
+/// A project's 7-day series, from the persisted aggregates. The fine-grained
+/// 24 h lives inside the detail payload; this endpoint is only the long view.
+async fn project_history(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Query(q): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    if api.store.project_by_slug(&slug).ok().flatten().is_none() {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    }
+    let minutes = if q.window.as_deref() == Some("7d") { 7 * 24 * 60 } else { q.minutes.unwrap_or(7 * 24 * 60) };
+    let since = now_secs() - (minutes as i64) * 60;
+    let rows = api.store.samples(&format!("project:{slug}"), since).unwrap_or_default();
+    Json(serde_json::json!({ "samples": rows })).into_response()
+}
+
+async fn docker_info(AxumState(api): AxumState<Api>) -> impl IntoResponse {
+    Json(api.state.read().await.docker)
 }
 
 async fn projects_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
@@ -747,18 +785,85 @@ fn mask(value: &str) -> String {
 
 // ---------- error tracking ----------
 
-async fn project_errors(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+#[derive(Deserialize)]
+struct ErrorsQuery {
+    /// "open" (default) | "resolved" | "ignored" | "all"
+    state: Option<String>,
+}
+
+async fn project_errors(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Query(q): Query<ErrorsQuery>,
+) -> impl IntoResponse {
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
     };
-    let issues = api.store.issues(p.id, false).unwrap_or_default();
+    let state = match q.state.as_deref() {
+        None => Some("open"),
+        Some("all") => None,
+        Some(other) => Some(other),
+    };
+    let issues = api.store.issues(p.id, state).unwrap_or_default();
+    // occurrence timestamps ride along: the per-issue sparkline needs them
+    let issues: Vec<serde_json::Value> = issues
+        .iter()
+        .map(|i| {
+            let mut v = serde_json::to_value(i).unwrap_or_default();
+            v["recent_ts"] = serde_json::json!(api.store.event_timestamps(i.id, 50).unwrap_or_default());
+            v
+        })
+        .collect();
+    let (open, resolved, ignored) = api.store.issue_counts(p.id).unwrap_or((0, 0, 0));
     let key = api.store.ingest_key(p.id).unwrap_or_default();
     let base = std::env::var("WEBO_PUBLIC_URL").unwrap_or_else(|_| "https://webo.axolutions.com.br".into());
     Json(serde_json::json!({
         "issues": issues,
+        "counts": { "open": open, "resolved": resolved, "ignored": ignored },
         "snippet": errmod::snippet(&base, &key),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+struct BulkReq {
+    ids: Vec<i64>,
+    /// "resolve" | "ignore" | "open" | "delete"
+    action: String,
+}
+
+async fn issues_bulk(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<BulkReq>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if req.ids.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "no issues selected");
+    }
+    let changed = match req.action.as_str() {
+        "delete" => api.store.delete_issues(p.id, &req.ids).unwrap_or(0),
+        "resolve" => api.store.set_issue_state(p.id, &req.ids, "resolved").unwrap_or(0),
+        "ignore" => api.store.set_issue_state(p.id, &req.ids, "ignored").unwrap_or(0),
+        "open" => api.store.set_issue_state(p.id, &req.ids, "open").unwrap_or(0),
+        _ => return err(StatusCode::BAD_REQUEST, "unknown action"),
+    };
+    Json(serde_json::json!({ "changed": changed })).into_response()
+}
+
+async fn issue_delete(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, id)): AxumPath<(String, i64)>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if api.store.delete_issues(p.id, &[id]).unwrap_or(0) == 0 {
+        return err(StatusCode::NOT_FOUND, "issue not found");
+    }
+    Json(serde_json::json!({ "deleted": true })).into_response()
 }
 
 async fn issue_detail(
@@ -768,7 +873,7 @@ async fn issue_detail(
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
     };
-    let belongs = api.store.issues(p.id, true).unwrap_or_default().into_iter().any(|i| i.id == id);
+    let belongs = api.store.issues(p.id, None).unwrap_or_default().into_iter().any(|i| i.id == id);
     if !belongs {
         return err(StatusCode::NOT_FOUND, "issue not found");
     }
@@ -777,6 +882,8 @@ async fn issue_detail(
 
 #[derive(Deserialize)]
 struct ResolveReq {
+    /// "open" | "resolved" | "ignored" — or the legacy `resolved` flag
+    state: Option<String>,
     #[serde(default)]
     resolved: bool,
 }
@@ -789,10 +896,11 @@ async fn issue_resolve(
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
     };
-    if !api.store.resolve_issue(p.id, id, req.resolved).unwrap_or(false) {
-        return err(StatusCode::NOT_FOUND, "issue not found");
+    let state = req.state.clone().unwrap_or_else(|| if req.resolved { "resolved".into() } else { "open".into() });
+    if api.store.set_issue_state(p.id, &[id], &state).unwrap_or(0) == 0 {
+        return err(StatusCode::NOT_FOUND, "issue not found or invalid state");
     }
-    Json(serde_json::json!({ "resolved": req.resolved })).into_response()
+    Json(serde_json::json!({ "state": state })).into_response()
 }
 
 /// Browsers preflight the ingest POST — the endpoint is meant to be called
@@ -838,6 +946,7 @@ async fn ingest_error(
         &event.origin,
         &event.message,
         event.ts,
+        errmod::culprit_of(&event.message).as_deref(),
     );
     (StatusCode::ACCEPTED, cors, Json(serde_json::json!({ "received": true }))).into_response()
 }
@@ -847,12 +956,42 @@ struct LogQuery {
     /// free text (FTS5)
     q: Option<String>,
     container: Option<String>,
+    /// "info" | "warn" | "error" — derived per line, not stored
+    level: Option<String>,
     /// window in minutes, counted back from now
     minutes: Option<i64>,
     limit: Option<usize>,
     /// read straight from the container instead of the index
     #[serde(default)]
     live: bool,
+}
+
+/// A log line as the panel receives it: the stored line plus its derived level.
+fn log_line_json(l: &crate::store::LogLine) -> serde_json::Value {
+    serde_json::json!({
+        "ts": l.ts, "container": l.container, "stream": l.stream, "line": l.line,
+        "level": errmod::level_of(&l.line, &l.stream),
+    })
+}
+
+/// Sidebar counts + the per-hour histogram, computed over one scan.
+fn log_stats(lines: &[crate::store::LogLine]) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let (mut info, mut warn, mut error) = (0u64, 0u64, 0u64);
+    let mut per_hour: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
+    for l in lines {
+        match errmod::level_of(&l.line, &l.stream) {
+            "error" => error += 1,
+            "warn" => warn += 1,
+            _ => info += 1,
+        }
+        *per_hour.entry(l.ts / 3600 * 3600).or_default() += 1;
+    }
+    let counts = serde_json::json!({ "info": info, "warn": warn, "error": error, "total": lines.len() });
+    let histogram = per_hour
+        .into_iter()
+        .map(|(ts, count)| serde_json::json!({ "ts": ts, "count": count }))
+        .collect();
+    (counts, histogram)
 }
 
 async fn project_logs(
@@ -870,18 +1009,30 @@ async fn project_logs(
         };
         let mut lines = logs::tail(&container, limit).await;
         lines.reverse(); // newest first, like the index
+        let lines: Vec<_> = lines.iter().map(log_line_json).collect();
         return Json(serde_json::json!({ "source": "docker", "lines": lines })).into_response();
     }
     let since = q.minutes.map(|m| now_secs() - m * 60);
     let text = q.q.as_deref().map(|t| t.trim()).filter(|t| !t.is_empty());
-    let lines = api
+    // one wide scan feeds counts, histogram and the visible page
+    let window = api
         .store
-        .search_logs(p.id, text, q.container.as_deref(), since, limit)
+        .search_logs(p.id, text, q.container.as_deref(), since, 5000)
         .unwrap_or_default();
+    let (counts, histogram) = log_stats(&window);
+    let level = q.level.as_deref().filter(|l| matches!(*l, "info" | "warn" | "error"));
+    let lines: Vec<_> = window
+        .iter()
+        .filter(|l| level.is_none_or(|lv| errmod::level_of(&l.line, &l.stream) == lv))
+        .take(limit)
+        .map(log_line_json)
+        .collect();
     let bytes = api.store.logs_bytes(p.id).unwrap_or(0);
     Json(serde_json::json!({
         "source": "index",
         "lines": lines,
+        "levels": counts,
+        "histogram": histogram,
         "stored_bytes": bytes,
         "max_bytes": logs::MAX_BYTES_PER_PROJECT,
     }))
@@ -980,6 +1131,7 @@ mod tests {
             cpu_pct: 1.5,
             mem_bytes: 2048,
             disk_bps: 0,
+            threads: 4,
             procs: 1,
             children: Vec::new(),
         }];
@@ -1025,6 +1177,7 @@ mod tests {
                 role: "app".into(),
                 image: "ghcr.io/murichristopher/codo:latest".into(),
                 state: "running".into(),
+                restarts: 0,
                 uptime_secs: 3600,
                 cpu_pct: 0.3,
                 mem_bytes: 210_000_000,
@@ -1064,6 +1217,147 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
         let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
         (status, json)
+    }
+
+    #[tokio::test]
+    async fn issues_move_through_states_in_bulk_and_die() {
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        let i1 = api.store.record_error(id, "f1", "boom a", "server", "codo", "boom a", 10, None).unwrap();
+        let i2 = api.store.record_error(id, "f2", "boom b", "server", "codo", "boom b", 20, None).unwrap();
+
+        // ignore in bulk
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects/codo/errors/bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"ids":[{i1},{i2}],"action":"ignore"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors?state=ignored").await;
+        assert_eq!(json["issues"].as_array().unwrap().len(), 2);
+
+        // an ignored issue that happens again STAYS ignored
+        api.store.record_error(id, "f1", "boom a", "server", "codo", "de novo", 30, None).unwrap();
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors").await;
+        assert!(json["issues"].as_array().unwrap().is_empty(), "nothing open");
+
+        // PUT with an explicit state reopens
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/projects/codo/errors/{i1}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"state":"open"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // deleting one leaves the other; unknown action is refused
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/projects/codo/errors/{i2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors?state=all").await;
+        assert_eq!(json["issues"].as_array().unwrap().len(), 1);
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects/codo/errors/bulk")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"ids":[1],"action":"explode"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn seven_day_history_reads_the_persisted_samples() {
+        let api = api_with_data();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let s = crate::store::StoredSample {
+            ts: now - 3600, cpu_pct: 3.5, mem_bytes: 777, disk_bps: 5, net_rx_bps: 11, net_tx_bps: 22,
+        };
+        api.store.insert_sample("server", &s).unwrap();
+        api.store.insert_sample("project:codo", &s).unwrap();
+
+        let (status, json) = get_on(api.clone(), "/api/v1/history?window=7d").await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["mem_used"], 777, "same keys as the live samples");
+        assert_eq!(rows[0]["net_rx_bps"], 11);
+
+        let (status, json) = get_on(api.clone(), "/api/v1/projects/codo/history?window=7d").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["samples"][0]["disk_bps"], 5);
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/nope/history?window=7d").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn docker_card_reads_the_state() {
+        let api = api_with_data();
+        {
+            let mut st = api.state.write().await;
+            st.docker = crate::metrics::DockerInfo {
+                images: 14, images_bytes: 24_600_000_000, volumes: 9,
+                volumes_bytes: 1_100_000_000, reclaimable_bytes: 6_200_000_000,
+            };
+        }
+        let (status, json) = get_on(api, "/api/v1/docker").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["images"], 14);
+        assert_eq!(json["reclaimable_bytes"], 6_200_000_000u64);
+    }
+
+    #[tokio::test]
+    async fn logs_carry_levels_counts_and_histogram() {
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        let base = 1_700_000_000i64;
+        let mk = |ts: i64, stream: &str, line: &str| crate::store::LogLine {
+            ts, container: "codo".into(), stream: stream.into(), line: line.into(),
+        };
+        api.store.insert_logs(id, &[
+            mk(base, "stdout", "GET / 200"),
+            mk(base + 10, "stdout", "WARN cache miss"),
+            mk(base + 3700, "stderr", "ERROR: connection refused"),
+        ]).unwrap();
+
+        let (status, json) = get_on(api.clone(), "/api/v1/projects/codo/logs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["levels"]["info"], 1);
+        assert_eq!(json["levels"]["warn"], 1);
+        assert_eq!(json["levels"]["error"], 1);
+        assert_eq!(json["histogram"].as_array().unwrap().len(), 2, "two distinct hours");
+        assert_eq!(json["lines"][0]["level"], "error", "newest first, with its level");
+
+        // level filter narrows the page but not the counts
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/logs?level=error").await;
+        assert_eq!(json["lines"].as_array().unwrap().len(), 1);
+        assert_eq!(json["levels"]["total"], 3);
     }
 
     #[tokio::test]
@@ -1386,6 +1680,12 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors").await;
         assert!(json["issues"].as_array().unwrap().is_empty());
+        assert_eq!(json["counts"]["resolved"], 1);
+        // ...but still listable by state
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/errors?state=resolved").await;
+        assert_eq!(json["issues"].as_array().unwrap().len(), 1);
+        assert_eq!(json["issues"][0]["culprit"], "a.js:1", "browser stack blames the first frame");
+        assert!(json["issues"][0]["recent_ts"].as_array().unwrap().len() == 1, "spark data rides along");
         let (_, json) = get_on(api.clone(), "/api/v1/projects").await;
         let codo = json["projects"].as_array().unwrap().iter().find(|p| p["slug"] == "codo").unwrap();
         assert_eq!(codo["open_errors"], 0);
@@ -1472,7 +1772,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn domain_connect_and_disconnect_against_a_mock_cloudflare() {
         let _env = crate::testutil::env_lock();
-        use axum::routing::{delete as axdelete, get as axget, post as axpost, put as axput};
+        use axum::routing::{delete as axdelete, get as axget, post as axpost};
         use serde_json::json;
         let router = axum::Router::new()
             .route("/zones/{z}/dns_records", axpost(|| async { axum::Json(json!({"success": true, "result": {"id": "rec1"}})) })

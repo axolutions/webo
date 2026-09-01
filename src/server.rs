@@ -1,6 +1,6 @@
 use crate::metrics::State;
 use crate::store::Store;
-use crate::{cloudflare, db, github, projects, scaffold};
+use crate::{cloudflare, db, github, logs, projects, scaffold};
 use axum::extract::{Path as AxumPath, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Json};
@@ -38,6 +38,7 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}/database/query", axum::routing::post(database_query))
         .route("/api/v1/projects/{slug}/env", get(env_list).put(env_set).delete(env_delete))
         .route("/api/v1/projects/{slug}/env/{key}", get(env_reveal))
+        .route("/api/v1/projects/{slug}/logs", get(project_logs))
         .route("/api/v1/github/repos", get(github_repos))
         .with_state(api)
 }
@@ -389,6 +390,7 @@ async fn project_delete(
             }
         }
     }
+    let _ = api.store.delete_logs(p.id);
     let _ = api.store.delete_project(&slug);
     api.state.write().await.projects_live.remove(&slug);
     sync_routes(&api).await;
@@ -729,6 +731,52 @@ fn mask(value: &str) -> String {
 }
 
 #[derive(Deserialize)]
+struct LogQuery {
+    /// free text (FTS5)
+    q: Option<String>,
+    container: Option<String>,
+    /// window in minutes, counted back from now
+    minutes: Option<i64>,
+    limit: Option<usize>,
+    /// read straight from the container instead of the index
+    #[serde(default)]
+    live: bool,
+}
+
+async fn project_logs(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Query(q): Query<LogQuery>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let limit = q.limit.unwrap_or(200).min(1000);
+    if q.live {
+        let Some(container) = q.container.clone() else {
+            return err(StatusCode::BAD_REQUEST, "live needs a container");
+        };
+        let mut lines = logs::tail(&container, limit).await;
+        lines.reverse(); // newest first, like the index
+        return Json(serde_json::json!({ "source": "docker", "lines": lines })).into_response();
+    }
+    let since = q.minutes.map(|m| now_secs() - m * 60);
+    let text = q.q.as_deref().map(|t| t.trim()).filter(|t| !t.is_empty());
+    let lines = api
+        .store
+        .search_logs(p.id, text, q.container.as_deref(), since, limit)
+        .unwrap_or_default();
+    let bytes = api.store.logs_bytes(p.id).unwrap_or(0);
+    Json(serde_json::json!({
+        "source": "index",
+        "lines": lines,
+        "stored_bytes": bytes,
+        "max_bytes": logs::MAX_BYTES_PER_PROJECT,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
 struct EnvReq {
     key: String,
     value: String,
@@ -877,10 +925,22 @@ mod tests {
             volume_bytes: 2_700_000,
             ..Default::default()
         };
-        live.history.push_back(ProjectSample { ts: 1, cpu_pct: 0.3, mem_bytes: 210_000_000 });
+        live.history.push_back(ProjectSample { ts: 1, cpu_pct: 0.3, mem_bytes: 210_000_000, disk_bps: 12_000 });
         st.projects_live.insert("codo".into(), live);
 
         Api { state: Arc::new(RwLock::new(st)), store: Arc::new(store) }
+    }
+
+    /// Same request, but against an api instance the test already has —
+    /// get_json builds a fresh store, which would not see seeded data.
+    async fn get_on(api: Api, path: &str) -> (StatusCode, serde_json::Value) {
+        let res = app(api)
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
     async fn get_json(path: &str) -> (StatusCode, serde_json::Value) {
@@ -1148,6 +1208,43 @@ mod tests {
         // a read on a project without a database says so plainly
         let res = post(api.clone(), r#"{"sql":"SELECT 1"}"#).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn logs_are_searched_filtered_and_windowed() {
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        let now = now_secs();
+        api.store.insert_logs(id, &[
+            crate::store::LogLine { ts: now - 7200, container: "codo".into(), stream: "stdout".into(), line: "boot antigo".into() },
+            crate::store::LogLine { ts: now - 60, container: "codo".into(), stream: "stderr".into(), line: "ERROR falha ao conectar".into() },
+            crate::store::LogLine { ts: now - 30, container: "codo-db".into(), stream: "stdout".into(), line: "ready to accept".into() },
+        ]).unwrap();
+
+        let (status, json) = get_on(api.clone(), "/api/v1/projects/codo/logs").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["source"], "index");
+        assert_eq!(json["lines"].as_array().unwrap().len(), 3);
+        assert_eq!(json["lines"][0]["container"], "codo-db", "newest first");
+        assert_eq!(json["max_bytes"], crate::logs::MAX_BYTES_PER_PROJECT);
+
+        // free text
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/logs?q=falha").await;
+        let lines = json["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["stream"], "stderr");
+
+        // by container and by window
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/logs?container=codo-db").await;
+        assert_eq!(json["lines"].as_array().unwrap().len(), 1);
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/logs?minutes=10").await;
+        assert_eq!(json["lines"].as_array().unwrap().len(), 2, "the two-hour-old line is out");
+
+        // live needs to know which container to read
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/codo/logs?live=true").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get_json("/api/v1/projects/nope/logs").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

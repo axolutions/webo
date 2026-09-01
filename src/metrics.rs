@@ -100,6 +100,8 @@ pub struct ProjectSample {
     pub ts: u64,
     pub cpu_pct: f32,
     pub mem_bytes: u64,
+    #[serde(default)]
+    pub disk_bps: u64,
 }
 
 /// Live (in-memory) aggregate for a project: containers + 24 h history.

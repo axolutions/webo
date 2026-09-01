@@ -1327,22 +1327,23 @@
       b.addEventListener("click", () => {
         logState.container = b.dataset.logs;
         loadLogs(d.slug);
-      errState = { issues: [], snippet: "", open: null, events: [], loadedFor: null };
-      loadErrors(d.slug);
         $("logs-card")?.scrollIntoView({ behavior: "smooth", block: "center" });
       });
     });
     if (!dbState.loadedFor || dbState.loadedFor !== d.slug) {
       dbState = { db: null, tables: [], table: null, write: false, loadedFor: d.slug, env: null };
       logState = { container: null, q: "", minutes: 60, lines: [], stored: 0, max: 0, loadedFor: null };
+      errState = { issues: [], snippet: "", open: null, events: [], loadedFor: null };
       loadDatabase(d.slug);
       loadEnv(d.slug);
       loadLogs(d.slug);
+      loadErrors(d.slug);
     } else {
       renderDatabaseCard(d.slug);
       renderDataTab(d.slug);
       renderLogs(d.slug);
-      renderErrors(d.slug);
+      // errors keep arriving while the page is open: refetch, don't repaint stale
+      loadErrors(d.slug);
       // the card is rebuilt on every refresh: repaint it from what we have,
       // otherwise it sits on the loading placeholder forever
       if (dbState.env) renderEnvCard(d.slug, dbState.env); else loadEnv(d.slug);

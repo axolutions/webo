@@ -35,7 +35,12 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/projects/{slug}/domain", axum::routing::put(domain_connect).delete(domain_disconnect))
         .route("/api/v1/projects/{slug}/database", get(database_get).post(database_create).delete(database_drop))
         .route("/api/v1/projects/{slug}/database/tables", get(database_tables))
+        .route("/api/v1/projects/{slug}/database/tables/{table}/rows", get(table_rows).post(table_insert))
         .route("/api/v1/projects/{slug}/database/query", axum::routing::post(database_query))
+        .route("/api/v1/projects/{slug}/database/queries", get(queries_list).put(query_save).delete(query_delete))
+        .route("/api/v1/projects/{slug}/database/backups", get(backups_list).post(backup_now))
+        .route("/api/v1/projects/{slug}/database/backups/{file}", get(backup_download))
+        .route("/api/v1/projects/{slug}/database/backups/{file}/restore", axum::routing::post(backup_restore))
         .route("/api/v1/projects/{slug}/env", get(env_list).put(env_set).delete(env_delete))
         .route("/api/v1/projects/{slug}/env/{key}", get(env_reveal))
         .route("/api/v1/projects/{slug}/logs", get(project_logs))
@@ -337,10 +342,25 @@ async fn project_create(
     .into_response()
 }
 
+#[derive(Deserialize, Default)]
+struct ProvisionReq {
+    /// "managed" (default when the repo expects DATABASE_URL) | "external" | "none"
+    db: Option<String>,
+    /// managed only: "17" | "16" | "15"
+    pg_version: Option<String>,
+    /// external only: the connection string webo stores as DATABASE_URL
+    database_url: Option<String>,
+    /// extra variables typed in the wizard's credentials step
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
+}
+
 async fn project_provision(
     AxumState(api): AxumState<Api>,
     AxumPath(slug): AxumPath<String>,
+    body: Option<Json<ProvisionReq>>,
 ) -> impl IntoResponse {
+    let req = body.map(|b| b.0).unwrap_or_default();
     let Some(token) = github_token() else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "github token not configured");
     };
@@ -350,6 +370,50 @@ async fn project_provision(
     let (Some(owner), Some(name)) = (p.repo_owner.clone(), p.repo_name.clone()) else {
         return err(StatusCode::BAD_REQUEST, "project has no repository connected");
     };
+
+    // wizard choices land BEFORE the commit: the first deploy must already
+    // find its DATABASE_URL and variables in the app's .env
+    let mut database_json = serde_json::Value::Null;
+    match req.db.as_deref() {
+        Some("managed") => {
+            if api.store.database(p.id).ok().flatten().is_none() {
+                let version = req.pg_version.clone().unwrap_or_else(|| "17".into());
+                match db::create_postgres(&slug, &app_network(), &version).await {
+                    Ok(mut database) => {
+                        database.created_at = now_secs();
+                        let url = db::database_url(
+                            database.username.as_deref().unwrap_or_default(),
+                            database.password.as_deref().unwrap_or_default(),
+                            database.container.as_deref().unwrap_or_default(),
+                            database.db_name.as_deref().unwrap_or_default(),
+                        );
+                        let _ = api.store.set_database(p.id, &database);
+                        let _ = api.store.set_env(p.id, "DATABASE_URL", &url, true);
+                        database_json = serde_json::to_value(&database).unwrap_or_default();
+                    }
+                    Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("database: {e}")),
+                }
+            }
+        }
+        Some("external") => {
+            let Some(url) = req.database_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) else {
+                return err(StatusCode::BAD_REQUEST, "external database needs its connection string");
+            };
+            let _ = api.store.set_env(p.id, "DATABASE_URL", url, false);
+        }
+        _ => {}
+    }
+    for (key, value) in &req.env {
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || key.starts_with("__WEBO_") {
+            continue;
+        }
+        if api.store.env_vars(p.id).unwrap_or_default().iter().any(|v| v.key == key && v.managed) {
+            continue; // the wizard never overwrites a managed value
+        }
+        let _ = api.store.set_env(p.id, key, value, false);
+    }
+    let env_written = materialize_env(&api, &slug).await.is_ok();
 
     let result = tokio::task::spawn_blocking({
         let (token, owner, name, slug) = (token.clone(), owner.clone(), name.clone(), slug.clone());
@@ -400,6 +464,8 @@ async fn project_provision(
                 "files": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
                 "secrets": secrets,
                 "auto_domain": domain,
+                "database": database_json,
+                "env_written": env_written,
             }))
             .into_response()
         }
@@ -574,7 +640,7 @@ async fn domain_disconnect(
 
 // ---------- databases and environment variables ----------
 
-fn app_network() -> String {
+pub fn app_network() -> String {
     std::env::var("WEBO_APP_NETWORK").unwrap_or_else(|_| "homelab".into())
 }
 
@@ -620,15 +686,26 @@ async fn database_get(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<S
     Json(serde_json::json!({ "database": db })).into_response()
 }
 
-async fn database_create(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+#[derive(Deserialize, Default)]
+struct CreateDbReq {
+    /// "17" (default) | "16" | "15"
+    version: Option<String>,
+}
+
+async fn database_create(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    body: Option<Json<CreateDbReq>>,
+) -> impl IntoResponse {
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
     };
     if api.store.database(p.id).ok().flatten().is_some() {
         return err(StatusCode::CONFLICT, "this project already has a database");
     }
+    let version = body.and_then(|b| b.0.version).unwrap_or_else(|| "17".into());
     let compose = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
-    match db::create_postgres(&compose, &app_network()).await {
+    match db::create_postgres(&compose, &app_network(), &version).await {
         Ok(mut database) => {
             database.created_at = now_secs();
             let url = db::database_url(
@@ -710,6 +787,8 @@ struct QueryReq {
     sql: String,
     #[serde(default)]
     write: bool,
+    /// When set, marks that saved query as just-run (sidebar ordering).
+    saved_name: Option<String>,
 }
 
 async fn database_query(
@@ -724,6 +803,9 @@ async fn database_query(
     if db::is_write_statement(&sql) && !req.write {
         return err(StatusCode::FORBIDDEN, "this statement changes data — turn write mode on");
     }
+    if let (Some(name), Ok(Some(p))) = (req.saved_name.as_deref(), api.store.project_by_slug(&slug)) {
+        let _ = api.store.mark_query_run(p.id, name, now_secs());
+    }
     match run_sql(&api, &slug, &sql, req.write).await {
         Ok(out) => {
             let parsed = db::parse_table_output(&out, 200);
@@ -737,6 +819,263 @@ async fn database_query(
             .into_response()
         }
         Err((code, msg)) => err(code, &msg),
+    }
+}
+
+/// The tables a project's database actually has — table names coming from
+/// the URL are only ever used after membership here, which kills injection.
+async fn table_names(api: &Api, slug: &str) -> Result<(String, Vec<String>), (StatusCode, String)> {
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
+    };
+    let Some(database) = api.store.database(p.id).ok().flatten() else {
+        return Err((StatusCode::NOT_FOUND, "project has no database".into()));
+    };
+    let sql = if database.kind == "postgres" {
+        "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name"
+    } else {
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    };
+    let out = run_sql(api, slug, sql, false).await?;
+    let parsed = db::parse_table_output(&out, 500);
+    Ok((database.kind, parsed.rows.iter().filter_map(|r| r.first().cloned()).collect()))
+}
+
+fn ident_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+#[derive(Deserialize)]
+struct RowsQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+    order: Option<String>,
+    /// "asc" | "desc"
+    dir: Option<String>,
+}
+
+/// Browses one table: rows + total, paginated, optionally ordered.
+async fn table_rows(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, table)): AxumPath<(String, String)>,
+    Query(q): Query<RowsQuery>,
+) -> impl IntoResponse {
+    let (_, tables) = match table_names(&api, &slug).await {
+        Ok(t) => t,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    if !tables.contains(&table) {
+        return err(StatusCode::NOT_FOUND, "table not found");
+    }
+    let limit = q.limit.unwrap_or(50).min(200);
+    let offset = q.offset.unwrap_or(0);
+    let order = match q.order.as_deref() {
+        Some(col) if ident_ok(col) => {
+            let dir = if q.dir.as_deref() == Some("desc") { "DESC" } else { "ASC" };
+            format!(" ORDER BY \"{col}\" {dir}")
+        }
+        Some(_) => return err(StatusCode::BAD_REQUEST, "invalid order column"),
+        None => String::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\"{order} LIMIT {limit} OFFSET {offset}");
+    let rows = match run_sql(&api, &slug, &sql, false).await {
+        Ok(out) => db::parse_table_output(&out, limit),
+        Err((code, msg)) => return err(code, &msg),
+    };
+    let total: i64 = match run_sql(&api, &slug, &format!("SELECT COUNT(*) FROM \"{table}\""), false).await {
+        Ok(out) => db::parse_table_output(&out, 2)
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+    Json(serde_json::json!({
+        "table": table,
+        "columns": rows.columns,
+        "rows": rows.rows,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct InsertReq {
+    values: std::collections::BTreeMap<String, String>,
+}
+
+/// Inserts one row. This is a write by definition, so it goes through the
+/// same write path the SQL editor uses — no read-only guard to bypass.
+async fn table_insert(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, table)): AxumPath<(String, String)>,
+    Json(req): Json<InsertReq>,
+) -> impl IntoResponse {
+    let (_, tables) = match table_names(&api, &slug).await {
+        Ok(t) => t,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    if !tables.contains(&table) {
+        return err(StatusCode::NOT_FOUND, "table not found");
+    }
+    if req.values.is_empty() || req.values.len() > 60 {
+        return err(StatusCode::BAD_REQUEST, "one to sixty columns");
+    }
+    if let Some(bad) = req.values.keys().find(|k| !ident_ok(k)) {
+        return err(StatusCode::BAD_REQUEST, &format!("invalid column name: {bad}"));
+    }
+    let cols: Vec<String> = req.values.keys().map(|k| format!("\"{k}\"")).collect();
+    // values travel as quoted literals with '' escaping — identifiers were
+    // validated above, and the table name is membership-checked
+    let vals: Vec<String> = req.values.values().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
+    let sql = format!("INSERT INTO \"{table}\" ({}) VALUES ({})", cols.join(", "), vals.join(", "));
+    match run_sql(&api, &slug, &sql, true).await {
+        Ok(out) => {
+            let lower = out.to_lowercase();
+            if lower.contains("error") {
+                return err(StatusCode::BAD_REQUEST, out.trim());
+            }
+            Json(serde_json::json!({ "inserted": true })).into_response()
+        }
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+// ---------- saved queries ----------
+
+async fn queries_list(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    Json(serde_json::json!({ "queries": api.store.saved_queries(p.id).unwrap_or_default() })).into_response()
+}
+
+#[derive(Deserialize)]
+struct SaveQueryReq {
+    name: String,
+    sql: String,
+}
+
+async fn query_save(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Json(req): Json<SaveQueryReq>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 80 || req.sql.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "a query needs a name (up to 80 chars) and a body");
+    }
+    let _ = api.store.save_query(p.id, &name, req.sql.trim(), now_secs());
+    Json(serde_json::json!({ "saved": true, "name": name })).into_response()
+}
+
+#[derive(Deserialize)]
+struct QueryName {
+    name: String,
+}
+
+async fn query_delete(
+    AxumState(api): AxumState<Api>,
+    AxumPath(slug): AxumPath<String>,
+    Query(q): Query<QueryName>,
+) -> impl IntoResponse {
+    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
+        return err(StatusCode::NOT_FOUND, "project not found");
+    };
+    if !api.store.delete_query(p.id, &q.name).unwrap_or(false) {
+        return err(StatusCode::NOT_FOUND, "query not found");
+    }
+    Json(serde_json::json!({ "deleted": true })).into_response()
+}
+
+// ---------- backups ----------
+
+async fn project_pg(api: &Api, slug: &str) -> Result<(i64, crate::store::Database), (StatusCode, String)> {
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
+    };
+    let Some(database) = api.store.database(p.id).ok().flatten() else {
+        return Err((StatusCode::NOT_FOUND, "project has no database".into()));
+    };
+    if database.kind != "postgres" {
+        return Err((StatusCode::BAD_REQUEST, "backups are for postgres databases".into()));
+    }
+    Ok((p.id, database))
+}
+
+async fn backups_list(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    if let Err((code, msg)) = project_pg(&api, &slug).await {
+        return err(code, &msg);
+    }
+    let root = std::path::PathBuf::from(crate::backups::backups_root());
+    Json(serde_json::json!({
+        "backups": crate::backups::list(&root, &slug),
+        "keep": crate::backups::KEEP_PER_PROJECT,
+    }))
+    .into_response()
+}
+
+async fn backup_now(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<String>) -> impl IntoResponse {
+    let database = match project_pg(&api, &slug).await {
+        Ok((_, d)) => d,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    match crate::backups::dump(&database, &app_network(), &slug).await {
+        Ok(file) => {
+            let root = std::path::PathBuf::from(crate::backups::backups_root());
+            crate::backups::prune(&root, &slug, crate::backups::KEEP_PER_PROJECT);
+            Json(serde_json::json!({ "file": file })).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+async fn backup_download(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, file)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = project_pg(&api, &slug).await {
+        return err(code, &msg);
+    }
+    let root = std::path::PathBuf::from(crate::backups::backups_root());
+    let Some(path) = crate::backups::file_path(&root, &slug, &file) else {
+        return err(StatusCode::NOT_FOUND, "backup not found");
+    };
+    let read = tokio::task::spawn_blocking(move || std::fs::read(&path)).await;
+    match read.unwrap_or_else(|_| Err(std::io::Error::other("task failed"))) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                ("content-type", "application/gzip".to_string()),
+                ("content-disposition", format!("attachment; filename=\"{slug}-{file}\"")),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => err(StatusCode::NOT_FOUND, "backup not found"),
+    }
+}
+
+async fn backup_restore(
+    AxumState(api): AxumState<Api>,
+    AxumPath((slug, file)): AxumPath<(String, String)>,
+) -> impl IntoResponse {
+    let database = match project_pg(&api, &slug).await {
+        Ok((_, d)) => d,
+        Err((code, msg)) => return err(code, &msg),
+    };
+    match crate::backups::restore(&database, &app_network(), &slug, &file).await {
+        Ok(()) => Json(serde_json::json!({ "restored": true })).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
     }
 }
 
@@ -1880,6 +2219,23 @@ mod tests {
         assert_eq!(json["error"], "github token not configured");
     }
 
+    async fn post_json_method(api: Api, method: &str, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        let res = app(api)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = res.status();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
     async fn post_json(api: Api, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
         let res = app(api)
             .oneshot(
@@ -1966,6 +2322,105 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    #[tokio::test]
+    async fn saved_queries_crud_over_http() {
+        let api = api_with_data();
+        // save, list, run-marks, delete
+        let (status, _) = post_json_method(api.clone(), "PUT", "/api/v1/projects/codo/database/queries",
+            serde_json::json!({"name": "leads por estado", "sql": "select estado, count(*) from leads group by 1"})).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = post_json_method(api.clone(), "PUT", "/api/v1/projects/codo/database/queries",
+            serde_json::json!({"name": "  ", "sql": "select 1"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "a name is required");
+
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/database/queries").await;
+        assert_eq!(json["queries"].as_array().unwrap().len(), 1);
+        assert_eq!(json["queries"][0]["name"], "leads por estado");
+
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/projects/codo/database/queries?name=leads%20por%20estado")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, json) = get_on(api.clone(), "/api/v1/projects/codo/database/queries").await;
+        assert!(json["queries"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backups_are_listed_and_downloaded_from_the_volume() {
+        let _env = crate::testutil::env_lock();
+        let api = api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+
+        // without a database the endpoints answer 404
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/codo/database/backups").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        api.store.set_database(id, &crate::store::Database {
+            kind: "postgres".into(), container: Some("codo-db".into()), db_name: Some("codo".into()),
+            username: Some("codo".into()), password: Some("x".into()), volume: None, file_path: None,
+            persisted: true, created_at: 1,
+        }).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("webo-bkhttp-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("codo")).unwrap();
+        std::fs::write(dir.join("codo/20260901-040000.sql.gz"), b"fake dump").unwrap();
+        std::env::set_var("WEBO_BACKUPS_DIR", dir.to_string_lossy().to_string());
+
+        let (status, json) = get_on(api.clone(), "/api/v1/projects/codo/database/backups").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["backups"].as_array().unwrap().len(), 1);
+        assert_eq!(json["backups"][0]["file"], "20260901-040000.sql.gz");
+        assert_eq!(json["keep"], 7);
+
+        // download carries the bytes and a filename; traversal is refused
+        let res = app(api.clone())
+            .oneshot(Request::builder().uri("/api/v1/projects/codo/database/backups/20260901-040000.sql.gz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get("content-type").unwrap(), "application/gzip");
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&bytes[..], b"fake dump");
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/codo/database/backups/..%2F..%2Fetc").await;
+        assert_ne!(status, StatusCode::OK);
+
+        // a sqlite project has no backups tab
+        api.store.set_database(id, &crate::store::Database {
+            kind: "sqlite".into(), container: None, db_name: None, username: None, password: None,
+            volume: Some("v".into()), file_path: Some("/data/app.db".into()), persisted: true, created_at: 1,
+        }).unwrap();
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/codo/database/backups").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        std::env::remove_var("WEBO_BACKUPS_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn table_browser_refuses_what_it_should() {
+        let api = api_with_data();
+        // no database at all
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/codo/database/tables/users/rows").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // unknown project
+        let (status, _) = get_on(api.clone(), "/api/v1/projects/nope/database/tables/users/rows").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // identifier validation is pure and strict
+        assert!(ident_ok("users"));
+        assert!(ident_ok("_migrations"));
+        assert!(!ident_ok("users; drop table x"));
+        assert!(!ident_ok("1users"));
+        assert!(!ident_ok(""));
+        assert!(!ident_ok(&"a".repeat(80)));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn wizard_flow_repos_create_and_provision() {
         let _env = crate::testutil::env_lock();
@@ -2023,9 +2478,40 @@ mod tests {
         assert_eq!(json["language"], "Python");
         assert!(api.store.project_by_slug("notas").unwrap().is_none());
 
-        // provision: one commit through the git data chain + secrets
-        let (status, json) = post_json(api.clone(), "/api/v1/projects/axofin/provision", serde_json::json!({})).await;
+        // an external database without its connection string is refused
+        // before anything is committed
+        let (status, json) = post_json(
+            api.clone(),
+            "/api/v1/projects/axofin/provision",
+            serde_json::json!({"db": "external", "database_url": "  "}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+        // provision: one commit through the git data chain + secrets,
+        // wizard env vars land (filtered), external db becomes DATABASE_URL
+        let (status, json) = post_json(
+            api.clone(),
+            "/api/v1/projects/axofin/provision",
+            serde_json::json!({
+                "db": "external",
+                "database_url": "postgres://u:p@neon:5432/axofin",
+                "env": {"NODE_ENV": "production", "__WEBO_HACK": "x", "bad key!": "x"},
+            }),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{json}");
+        {
+            let id = api.store.project_by_slug("axofin").unwrap().unwrap().id;
+            let vars = api.store.env_vars(id).unwrap();
+            let keys: Vec<&str> = vars.iter().map(|v| v.key.as_str()).collect();
+            assert!(keys.contains(&"DATABASE_URL"), "external url stored");
+            assert!(keys.contains(&"NODE_ENV"));
+            assert!(!keys.contains(&"__WEBO_HACK"), "reserved prefix filtered");
+            assert!(!keys.iter().any(|k| k.contains(' ')), "invalid names filtered");
+            let url = vars.iter().find(|v| v.key == "DATABASE_URL").unwrap();
+            assert!(!url.managed, "an external database is the user's, not webo's");
+        }
         assert_eq!(json["commit_sha"], "a3f9e21fff");
         assert_eq!(json["files"].as_array().unwrap().len(), 4);
         let secrets = json["secrets"].as_array().unwrap();

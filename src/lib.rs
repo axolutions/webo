@@ -1,3 +1,4 @@
+pub mod backups;
 pub mod cloudflare;
 pub mod collector;
 pub mod db;

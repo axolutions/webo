@@ -105,6 +105,14 @@ pub struct EnvVar {
     pub managed: bool,
 }
 
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct SavedQuery {
+    pub name: String,
+    pub sql: String,
+    pub updated_at: i64,
+    pub last_run_at: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Build {
     pub run_id: i64,
@@ -218,6 +226,14 @@ CREATE TABLE IF NOT EXISTS env_vars (
     value TEXT NOT NULL,
     managed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project_id, key)
+);
+CREATE TABLE IF NOT EXISTS saved_queries (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    sql TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    last_run_at INTEGER,
+    PRIMARY KEY (project_id, name)
 );
 -- 5-minute metric aggregates: the 7-day charts read from here
 CREATE TABLE IF NOT EXISTS samples (
@@ -690,6 +706,50 @@ impl Store {
 
     pub fn resolve_issue(&self, project_id: i64, issue_id: i64, resolved: bool) -> rusqlite::Result<bool> {
         Ok(self.set_issue_state(project_id, &[issue_id], if resolved { "resolved" } else { "open" })? > 0)
+    }
+
+    // ---------- saved SQL queries ----------
+
+    pub fn save_query(&self, project_id: i64, name: &str, sql: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO saved_queries (project_id, name, sql, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (project_id, name) DO UPDATE SET sql = excluded.sql, updated_at = excluded.updated_at",
+            params![project_id, name, sql, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn saved_queries(&self, project_id: i64) -> rusqlite::Result<Vec<SavedQuery>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, sql, updated_at, last_run_at FROM saved_queries
+             WHERE project_id = ?1 ORDER BY COALESCE(last_run_at, updated_at) DESC",
+        )?;
+        let rows = stmt.query_map(params![project_id], |r| {
+            Ok(SavedQuery { name: r.get(0)?, sql: r.get(1)?, updated_at: r.get(2)?, last_run_at: r.get(3)? })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_query(&self, project_id: i64, name: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "DELETE FROM saved_queries WHERE project_id = ?1 AND name = ?2",
+            params![project_id, name],
+        )? > 0)
+    }
+
+    /// Bumps last_run_at when a saved query is executed, so the sidebar
+    /// orders by real use.
+    pub fn mark_query_run(&self, project_id: i64, name: &str, now: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE saved_queries SET last_run_at = ?1 WHERE project_id = ?2 AND name = ?3",
+            params![now, project_id, name],
+        )?;
+        Ok(())
     }
 
     // ---------- persisted metric samples (the 7-day window) ----------
@@ -1272,6 +1332,33 @@ mod tests {
         assert_eq!(s.delete_issues(id, &[i1, 9999]).unwrap(), 1);
         assert!(s.event_timestamps(i1, 10).unwrap().is_empty());
         assert_eq!(s.issues(id, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn saved_queries_upsert_order_and_die_with_the_project() {
+        let s = store();
+        s.upsert_discovered("loja", "loja", None, None, 1).unwrap();
+        let id = s.project_by_slug("loja").unwrap().unwrap().id;
+
+        s.save_query(id, "leads por estado", "select 1", 100).unwrap();
+        s.save_query(id, "pedidos", "select 2", 200).unwrap();
+        // upsert replaces the sql
+        s.save_query(id, "leads por estado", "select 1, 2", 300).unwrap();
+        let qs = s.saved_queries(id).unwrap();
+        assert_eq!(qs.len(), 2);
+        assert_eq!(qs[0].name, "leads por estado", "most recently touched first");
+        assert_eq!(qs[0].sql, "select 1, 2");
+
+        // running one bumps it to the top
+        s.mark_query_run(id, "pedidos", 400).unwrap();
+        assert_eq!(s.saved_queries(id).unwrap()[0].name, "pedidos");
+        assert_eq!(s.saved_queries(id).unwrap()[0].last_run_at, Some(400));
+
+        assert!(s.delete_query(id, "pedidos").unwrap());
+        assert!(!s.delete_query(id, "pedidos").unwrap(), "second delete is a no-op");
+
+        s.delete_project("loja").unwrap();
+        assert!(s.saved_queries(id).unwrap().is_empty(), "cascade");
     }
 
     #[test]

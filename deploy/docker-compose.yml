@@ -15,6 +15,7 @@ services:
       - WEBO_DB_PATH=/data/webo.db
     volumes:
       - webo-data:/data                                # project metadata (SQLite)
+      - webo-backups:/backups                          # database dumps (shared with the pg_dump helpers)
       - /var/run/docker.sock:/var/run/docker.sock:ro   # project discovery + container metrics (optional)
       - /proc/net/dev:/host/proc_net_dev:ro            # host network rates (optional)
       - /sys:/sys:ro                                   # temperature and battery (optional)
@@ -23,3 +24,7 @@ services:
 
 volumes:
   webo-data:
+  webo-backups:
+    # fixed name: the short-lived pg_dump/pg_restore helper containers bind
+    # the same volume by name, outside compose
+    name: webo-backups

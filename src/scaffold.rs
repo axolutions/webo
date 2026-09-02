@@ -30,10 +30,12 @@ pub fn detect(gemfile: Option<&str>, package_json: Option<&str>) -> Option<Templ
     None
 }
 
-/// The Ruby the app asks for, so the image matches it — a Gemfile pinned to
-/// 3.2 built on a 3.3 image fails with "your Gemfile specified", and the
-/// user has no way to see why. `.ruby-version` wins; the Gemfile's `ruby`
-/// line is the fallback. Only major.minor is used: patch releases move.
+/// The Ruby the app asks for, so the image matches it. bundler compares the
+/// FULL version: a Gemfile pinned to 3.2.1 on a ruby:3.2 image (which ships
+/// 3.2.11 today) still fails with "your Gemfile specified" — so the patch is
+/// kept when the repo names one, and the official images have a tag for every
+/// released patch. `.ruby-version` wins; the Gemfile's `ruby` line is the
+/// fallback.
 pub fn ruby_version(ruby_version_file: Option<&str>, gemfile: Option<&str>) -> String {
     let clean = |raw: &str| -> Option<String> {
         let v: String = raw
@@ -42,11 +44,11 @@ pub fn ruby_version(ruby_version_file: Option<&str>, gemfile: Option<&str>) -> S
             .chars()
             .take_while(|c| c.is_ascii_digit() || *c == '.')
             .collect();
-        let mut parts = v.split('.');
-        let major = parts.next().filter(|p| !p.is_empty())?;
-        let minor = parts.next().filter(|p| !p.is_empty())?;
+        let parts: Vec<&str> = v.split('.').filter(|p| !p.is_empty()).collect();
+        let major: u32 = parts.first()?.parse().ok()?;
+        parts.get(1)?; // a bare "3" names no image
         // anything older than 3.0 is not worth an image that exists
-        (major.parse::<u32>().ok()? >= 3).then(|| format!("{major}.{minor}"))
+        (major >= 3).then(|| parts.join("."))
     };
     ruby_version_file
         .and_then(|f| f.lines().next())
@@ -157,15 +159,20 @@ mod tests {
 
     #[test]
     fn ruby_version_follows_the_repo() {
-        // .ruby-version wins, in every spelling it comes in
-        assert_eq!(ruby_version(Some("3.2.1\n"), None), "3.2");
-        assert_eq!(ruby_version(Some("ruby-3.1.4"), None), "3.1");
+        // the patch is kept: bundler compares the full version, and
+        // ruby:3.2 ships a newer patch than a Gemfile pinned to 3.2.1
+        assert_eq!(ruby_version(Some("3.2.1\n"), None), "3.2.1");
+        assert_eq!(ruby_version(Some("ruby-3.1.4"), None), "3.1.4");
+        // major.minor alone stays as it is
+        assert_eq!(ruby_version(Some("3.3"), None), "3.3");
         // the Gemfile is the fallback
         let gemfile = "source \"https://rubygems.org\"\nruby \"3.2.1\"\ngem \"rails\"\n";
-        assert_eq!(ruby_version(None, Some(gemfile)), "3.2");
-        assert_eq!(ruby_version(None, Some("ruby '3.4.2'")), "3.4");
+        assert_eq!(ruby_version(None, Some(gemfile)), "3.2.1");
+        assert_eq!(ruby_version(None, Some("ruby '3.4.2'")), "3.4.2");
         // the file beats the Gemfile when both are there
-        assert_eq!(ruby_version(Some("3.1.0"), Some(gemfile)), "3.1");
+        assert_eq!(ruby_version(Some("3.1.0"), Some(gemfile)), "3.1.0");
+        // a bare major names no image
+        assert_eq!(ruby_version(Some("3"), None), DEFAULT_RUBY);
         // nothing usable falls back to the template's own
         assert_eq!(ruby_version(None, None), DEFAULT_RUBY);
         assert_eq!(ruby_version(Some(""), Some("gem \"rails\"")), DEFAULT_RUBY);

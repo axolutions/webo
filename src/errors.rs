@@ -33,9 +33,50 @@ pub struct ErrorEvent {
     pub ts: i64,
 }
 
+/// Many loggers stamp their own level into the line. Ruby/Rails writes
+/// `E, [2026-09-02T00:49:30 #1] ERROR -- : the message`, and that declared
+/// level is authoritative: an INFO line that merely says "500 Internal Server
+/// Error" is not an error, and grouping it buries the real one.
+/// Returns (declared level, the message without the prefix).
+pub fn strip_log_prefix(line: &str) -> (Option<&'static str>, &str) {
+    let t = line.trim_start();
+    // Ruby Logger: "<L>, [<timestamp> #<pid>] <LEVEL> -- : <message>"
+    if let Some(rest) = t.split_once("] ").map(|(_, r)| r) {
+        if t.starts_with(['D', 'I', 'W', 'E', 'F', 'A']) && t[1..].starts_with(", [") {
+            let (level_word, msg) = match rest.split_once(" -- : ") {
+                Some(pair) => pair,
+                None => return (None, line),
+            };
+            let level = match level_word.trim() {
+                "ERROR" | "FATAL" => "error",
+                "WARN" => "warn",
+                _ => "info",
+            };
+            return (Some(level), msg);
+        }
+    }
+    (None, line)
+}
+
+/// Rails prefixes every line of a request with its id — unique per request,
+/// so it must never reach a title or a fingerprint.
+pub fn strip_request_id(msg: &str) -> &str {
+    let t = msg.trim_start();
+    let Some(inner) = t.strip_prefix('[') else { return t };
+    let Some((id, rest)) = inner.split_once(']') else { return t };
+    let looks_like_id = id.len() >= 8
+        && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        && id.chars().any(|c| c.is_ascii_digit());
+    if looks_like_id { rest.trim_start() } else { t }
+}
+
 /// Log level, derived from the line itself — nothing is stored for this,
 /// the heuristic is cheap enough to run at read time.
 pub fn level_of(line: &str, stream: &str) -> &'static str {
+    // a line that states its own level is believed
+    if let (Some(declared), _) = strip_log_prefix(line) {
+        return declared;
+    }
     if looks_like_error(line, stream) {
         return "error";
     }
@@ -83,6 +124,11 @@ pub fn culprit_of(message: &str) -> Option<String> {
 
 /// Is this log line an error?
 pub fn looks_like_error(line: &str, stream: &str) -> bool {
+    // a logger that states its own level settles it: an INFO line reading
+    // "Completed 500 Internal Server Error" is a status, not a new error
+    if let (Some(declared), _) = strip_log_prefix(line) {
+        return declared == "error";
+    }
     let lower = line.to_ascii_lowercase();
     if NOISE.iter().any(|n| lower.contains(n)) {
         return false;
@@ -122,10 +168,16 @@ pub fn fingerprint(message: &str) -> String {
                 out.push_str("<path>");
             }
             c if c.is_ascii_digit() => {
-                while chars.peek().is_some_and(|n| n.is_ascii_digit() || *n == '.' || *n == ':') {
-                    chars.next();
+                // a run of hex and dashes is an id (uuid, request id, sha)
+                let mut run = String::from(c);
+                while chars
+                    .peek()
+                    .is_some_and(|n| n.is_ascii_hexdigit() || matches!(n, '.' | ':' | '-'))
+                {
+                    run.push(chars.next().unwrap());
                 }
-                out.push_str("<n>");
+                let hexish = run.len() >= 8 && run.chars().any(|c| c.is_ascii_alphabetic());
+                out.push_str(if hexish { "<id>" } else { "<n>" });
             }
             c if c.is_whitespace() => {
                 if !out.ends_with(' ') {
@@ -141,7 +193,10 @@ pub fn fingerprint(message: &str) -> String {
 /// A short human title: the first line, trimmed of timestamps and levels.
 pub fn title_of(message: &str) -> String {
     let first = message.lines().next().unwrap_or(message).trim();
-    // drop a leading timestamp and level, e.g. "2026-09-01 03:11 UTC [117] ERROR:  x"
+    // a structured logger's own prefix goes first, then the request id
+    let (_, without_prefix) = strip_log_prefix(first);
+    let first = strip_request_id(without_prefix);
+    // then a plain "ERROR:" style prefix, e.g. "2026-09-01 03:11 UTC [117] ERROR:  x"
     let cleaned = first
         .split_once("ERROR:")
         .or_else(|| first.split_once("Error:"))
@@ -253,6 +308,59 @@ mod tests {
             fingerprint(&title_of(framework)),
             "one bug, one issue"
         );
+    }
+
+    #[test]
+    fn a_rails_request_is_one_issue_not_a_dozen() {
+        // what a single failing Rails request writes: the app's own line, the
+        // framework's status line, and the exception with its request id
+        let lines = [
+            "E, [2026-09-02T00:49:29.029053 #1] ERROR -- : [67737fac-3b15-4ed1-914a-7e1f5e6ca722] [railsdemo] about to explode on purpose",
+            "I, [2026-09-02T00:49:29.029174 #1]  INFO -- : [67737fac-3b15-4ed1-914a-7e1f5e6ca722] Completed 500 Internal Server Error in 0ms",
+            "[67737fac-3b15-4ed1-914a-7e1f5e6ca722] NoMethodError (undefined method `valor' for nil:NilClass):",
+        ];
+        // the INFO status line is not an error, however much it says "Error"
+        assert!(!looks_like_error(lines[1], "stdout"), "a status line is not a new error");
+        assert_eq!(level_of(lines[1], "stdout"), "info", "the logger's own level wins");
+        assert!(looks_like_error(lines[0], "stdout"));
+        assert_eq!(level_of(lines[0], "stdout"), "error");
+
+        // titles carry neither the logger prefix nor the request id
+        assert_eq!(title_of(lines[0]), "[railsdemo] about to explode on purpose");
+        assert_eq!(
+            title_of(lines[2]),
+            "NoMethodError (undefined method `valor' for nil:NilClass):"
+        );
+
+        // and the SAME failure on another request lands on the same issue
+        let other_request = "[3769503f-467d-4085-a50b-db9ec9249fb1] NoMethodError (undefined method `valor' for nil:NilClass):";
+        assert_eq!(
+            fingerprint(&title_of(lines[2])),
+            fingerprint(&title_of(other_request)),
+            "the request id must not split one bug into two issues"
+        );
+        // two genuinely different failures stay apart
+        let db = "[abc12345-0000-0000-0000-000000000000] ActiveRecord::StatementInvalid (PG::UndefinedColumn: ERROR:  column \"x\" does not exist)";
+        assert_ne!(fingerprint(&title_of(lines[2])), fingerprint(&title_of(db)));
+    }
+
+    #[test]
+    fn log_prefixes_and_request_ids_are_recognised() {
+        let (lvl, msg) = strip_log_prefix("W, [2026-09-02T00:00:00 #1]  WARN -- : cache miss");
+        assert_eq!(lvl, Some("warn"));
+        assert_eq!(msg, "cache miss");
+        let (lvl, msg) = strip_log_prefix("F, [2026-09-02T00:00:00 #1] FATAL -- : boom");
+        assert_eq!(lvl, Some("error"), "fatal counts as an error");
+        assert_eq!(msg, "boom");
+        // a plain line is left alone
+        let (lvl, msg) = strip_log_prefix("GET /health 200");
+        assert_eq!(lvl, None);
+        assert_eq!(msg, "GET /health 200");
+
+        assert_eq!(strip_request_id("[67737fac-3b15-4ed1-914a-7e1f5e6ca722] boom"), "boom");
+        assert_eq!(strip_request_id("[railsdemo] listing notes"), "[railsdemo] listing notes",
+                   "a word in brackets is not a request id");
+        assert_eq!(strip_request_id("no brackets"), "no brackets");
     }
 
     #[test]

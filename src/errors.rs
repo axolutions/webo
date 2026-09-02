@@ -58,6 +58,11 @@ pub fn strip_log_prefix(line: &str) -> (Option<&'static str>, &str) {
     (None, line)
 }
 
+/// Is there a message here, or only punctuation and whitespace?
+fn has_substance(msg: &str) -> bool {
+    msg.chars().any(|c| c.is_alphanumeric())
+}
+
 /// Rails prefixes every line of a request with its id — unique per request,
 /// so it must never reach a title or a fingerprint.
 pub fn strip_request_id(msg: &str) -> &str {
@@ -126,8 +131,10 @@ pub fn culprit_of(message: &str) -> Option<String> {
 pub fn looks_like_error(line: &str, stream: &str) -> bool {
     // a logger that states its own level settles it: an INFO line reading
     // "Completed 500 Internal Server Error" is a status, not a new error
-    if let (Some(declared), _) = strip_log_prefix(line) {
-        return declared == "error";
+    if let (Some(declared), rest) = strip_log_prefix(line) {
+        // Rails ends an exception report with a bare ERROR line — a prefix,
+        // a request id and nothing else. It is spacing, not an occurrence.
+        return declared == "error" && has_substance(strip_request_id(rest));
     }
     let lower = line.to_ascii_lowercase();
     if NOISE.iter().any(|n| lower.contains(n)) {
@@ -321,6 +328,11 @@ mod tests {
         ];
         // the INFO status line is not an error, however much it says "Error"
         assert!(!looks_like_error(lines[1], "stdout"), "a status line is not a new error");
+        // and Rails closes an exception report with an empty ERROR line
+        assert!(
+            !looks_like_error("E, [2026-09-02T00:57:26.126798 #1] ERROR -- : [4def44af-9dc0-44f9-90c0-ff7e8aaca782]   ", "stdout"),
+            "a prefix with no message is spacing, not an occurrence"
+        );
         assert_eq!(level_of(lines[1], "stdout"), "info", "the logger's own level wins");
         assert!(looks_like_error(lines[0], "stdout"));
         assert_eq!(level_of(lines[0], "stdout"), "error");

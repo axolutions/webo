@@ -273,6 +273,8 @@ struct RepoScan {
     language: Option<String>,
     template: Option<scaffold::Template>,
     has_dockerfile: bool,
+    /// major.minor the app asks for, so the image matches its Gemfile
+    ruby: String,
 }
 
 fn scan_repo(token: &str, owner: &str, name: &str) -> Option<RepoScan> {
@@ -280,11 +282,13 @@ fn scan_repo(token: &str, owner: &str, name: &str) -> Option<RepoScan> {
     let gemfile = github::get_file(token, owner, name, "Gemfile");
     let package_json = github::get_file(token, owner, name, "package.json");
     let has_dockerfile = github::get_file(token, owner, name, "Dockerfile").is_some();
+    let ruby_file = github::get_file(token, owner, name, ".ruby-version");
     Some(RepoScan {
         branch: info.default_branch,
         language: info.language,
         template: scaffold::detect(gemfile.as_deref(), package_json.as_deref()),
         has_dockerfile,
+        ruby: scaffold::ruby_version(ruby_file.as_deref(), gemfile.as_deref()),
     })
 }
 
@@ -337,7 +341,7 @@ async fn project_create(
     if api.store.register(&slug, &owner, &name, tech, now).is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "could not register the project");
     }
-    let files = scaffold::plan(template, &slug, &owner, &name, &scan.branch, scan.has_dockerfile);
+    let files = scaffold::plan(template, &slug, &owner, &name, &scan.branch, scan.has_dockerfile, &scan.ruby);
     Json(serde_json::json!({
         "supported": true,
         "slug": slug,
@@ -345,6 +349,7 @@ async fn project_create(
         "tech": tech,
         "branch": scan.branch,
         "has_dockerfile": scan.has_dockerfile,
+        "ruby": scan.ruby,
         "files": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
         "secrets": secrets_json(),
     }))
@@ -429,7 +434,7 @@ async fn project_provision(
         move || {
             let scan = scan_repo(&token, &owner, &name).ok_or("repository unreadable")?;
             let template = scan.template.ok_or("technology not supported")?;
-            let files = scaffold::plan(template, &slug, &owner, &name, &scan.branch, scan.has_dockerfile);
+            let files = scaffold::plan(template, &slug, &owner, &name, &scan.branch, scan.has_dockerfile, &scan.ruby);
             let label = match template {
                 scaffold::Template::Rails => "rails",
                 scaffold::Template::Next => "next",

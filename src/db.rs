@@ -436,9 +436,14 @@ pub async fn write_app_env(app: &str, body: &str) -> Result<(), String> {
     };
     // compose resolves `env_file` relative to the compose file, which lives in
     // <app>/deploy — a .env one level up is silently ignored.
-    // base64 keeps quotes, newlines and specials intact through the shell
+    // base64 keeps quotes, newlines and specials intact through the shell.
+    // The helper runs as root, so anything it creates would be root-owned and
+    // the deploy (which lands over SSH as the server's own user) could not
+    // write its compose files there — the new directories inherit the owner
+    // of the apps directory itself.
     let script = format!(
-        "mkdir -p /apps/{app}/deploy && echo '{encoded}' | base64 -d > /apps/{app}/deploy/.env && echo WEBO_ENV_OK"
+        "mkdir -p /apps/{app}/deploy && echo '{encoded}' | base64 -d > /apps/{app}/deploy/.env && \
+         OWNER=$(stat -c '%u:%g' /apps) && chown -R \"$OWNER\" /apps/{app} && echo WEBO_ENV_OK"
     );
     let out = run_helper(
         &docker,
@@ -501,6 +506,18 @@ mod tests {
 
         assert!(write_app_env("../escape", body).await.is_err(), "path traversal refused");
         assert!(write_app_env("", body).await.is_err());
+
+        // the directory the helper created belongs to whoever owns the apps
+        // directory, not to root — the deploy writes its compose files there
+        // over SSH as the server's own user
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let apps = std::fs::metadata(&dir).unwrap();
+            let created = std::fs::metadata(dir.join("myapp/deploy")).unwrap();
+            assert_eq!(created.uid(), apps.uid(), "uid inherited from the apps dir");
+            assert_eq!(created.gid(), apps.gid(), "gid inherited from the apps dir");
+        }
 
         std::env::remove_var("WEBO_APPS_DIR");
         std::fs::remove_dir_all(&dir).ok();

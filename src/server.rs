@@ -1455,14 +1455,14 @@ async fn env_delete(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::metrics::{ProcessGroup, ProjectContainer, ProjectLive, ProjectSample, Snapshot};
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use tower::ServiceExt;
 
-    fn api_with_data() -> Api {
+    pub(crate) fn api_with_data() -> Api {
         let mut st = State::new(10);
         st.system.hostname = "test-host".into();
         st.system.webo_version = "9.9.9".into();

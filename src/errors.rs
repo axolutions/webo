@@ -55,6 +55,24 @@ pub fn strip_log_prefix(line: &str) -> (Option<&'static str>, &str) {
             return (Some(level), msg);
         }
     }
+    // nginx, kong, and most C daemons: "2026/09/02 19:37:04 [info] 29#0: message".
+    // The bracketed word is the level, and it is authoritative — an [info] line
+    // saying "recv() failed" is a client disconnecting, not an error.
+    let head = t.get(..48).unwrap_or(t);
+    if let Some(open) = head.find('[') {
+        let after = &t[open + 1..];
+        if let Some(close) = after.find(']') {
+            let level = match &after[..close] {
+                "error" | "crit" | "alert" | "emerg" | "fatal" => Some("error"),
+                "warn" | "warning" => Some("warn"),
+                "info" | "notice" | "debug" | "trace" => Some("info"),
+                _ => None,
+            };
+            if let Some(level) = level {
+                return (Some(level), after[close + 1..].trim_start());
+            }
+        }
+    }
     (None, line)
 }
 
@@ -356,6 +374,34 @@ mod tests {
         assert_ne!(fingerprint(&title_of(lines[2])), fingerprint(&title_of(db)));
     }
 
+    #[test]
+    fn a_bracketed_level_is_believed_whatever_the_daemon() {
+        // nginx/kong put the level in brackets after the timestamp
+        let noise = "2026/09/02 19:37:04 [info] 29#0: *70416 recv() failed (104: Connection reset by peer) while processing HTTP/2 connection";
+        assert_eq!(level_of(noise, "stderr"), "info");
+        assert!(
+            !looks_like_error(noise, "stderr"),
+            "a client disconnecting is not an error, however much it says failed"
+        );
+
+        let real = "2026/09/02 19:07:01 [error] 29#0: *32742 [kong] mp_rpc.lua:308 no plugin instance";
+        assert_eq!(level_of(real, "stderr"), "error");
+        assert!(looks_like_error(real, "stderr"));
+        // the level and everything before it come off the title
+        assert_eq!(title_of(real), "29#0: *32742 [kong] mp_rpc.lua:308 no plugin instance");
+
+        // crit/alert/emerg are errors; notice and debug are not
+        assert_eq!(level_of("2026/09/02 19:07:01 [crit] disk full", "stderr"), "error");
+        assert_eq!(level_of("2026/09/02 19:07:01 [notice] reloading", "stderr"), "info");
+        assert_eq!(level_of("2026/09/02 19:07:01 [warn] slow upstream", "stderr"), "warn");
+
+        // a bracketed word that is NOT a level leaves the line alone
+        let app_tag = "[railsdemo] listing notes";
+        assert_eq!(strip_log_prefix(app_tag), (None, app_tag));
+        // and a bracket far into the line is not a prefix
+        let late = "something happened a while into the line and then [error] appeared here somewhere";
+        assert_eq!(strip_log_prefix(late).0, None);
+    }
     #[test]
     fn log_prefixes_and_request_ids_are_recognised() {
         let (lvl, msg) = strip_log_prefix("W, [2026-09-02T00:00:00 #1]  WARN -- : cache miss");

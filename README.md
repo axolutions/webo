@@ -1,3 +1,5 @@
+<img width="1380" height="865" alt="image" src="https://github.com/user-attachments/assets/512d3f4d-7c97-42c4-8212-5cd8a44b2ba9" />
+
 # webo
 
 A health panel for your server — CPU, memory, disk, temperature, battery and

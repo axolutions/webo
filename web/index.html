@@ -68,6 +68,19 @@
   ::selection { background: rgba(79, 139, 255, 0.3); }
   .wrap { max-width: 1320px; margin: 0 auto; padding: 22px 24px 40px; }
 
+  /* ---------- login gate ---------- */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .gate { position: fixed; inset: 0; display: grid; place-items: center; padding: 22px; background: var(--page); z-index: 60; }
+  .gate[hidden] { display: none; }
+  .gate-card { display: flex; flex-direction: column; align-items: center; gap: 22px; width: 100%; max-width: 400px; }
+  .gate-brand { display: flex; align-items: center; gap: 11px; }
+  .gate-msg { max-width: 340px; text-align: center; font-size: 13.5px; line-height: 1.65; color: var(--text-2); }
+  .gate-msg.bad { color: #ff8f8f; }
+  .gate-code { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: .14em; padding: 14px 20px; border: 1px solid var(--stroke); border-radius: 14px; background: var(--surface-2); }
+  .gate-actions { display: flex; gap: 10px; }
+  #user-slot { display: flex; align-items: center; }
+  #user-slot .cl-userButtonBox { height: 32px; }
+
   /* ---------- header + scope ---------- */
   header.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .brand { display: flex; align-items: center; gap: 12px; }
@@ -522,7 +535,21 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<!-- Until /api/config answers, nothing is shown: rendering the panel and then
+     yanking it away reads as a bug, and rendering a login that turns out not to
+     be needed is worse. -->
+<div class="gate" id="gate">
+  <div class="gate-card">
+    <div class="gate-brand">
+      <div class="brand-icon">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2"></rect><rect x="3" y="13" width="18" height="7" rx="2"></rect><path d="M7 7.5h.01M7 16.5h.01"></path></svg>
+      </div>
+      <span class="brand-name" style="font-size:19px">webo</span>
+    </div>
+    <div id="gate-body"><div class="gate-msg" id="gate-msg"></div></div>
+  </div>
+</div>
+<div class="wrap" id="wrap" hidden>
   <header class="top">
     <div class="brand">
       <div class="brand-icon">
@@ -537,6 +564,7 @@
     </div>
     <div class="chips">
       <span class="chip" id="up-chip"><span class="dot" id="up-dot"></span><span id="up-text">—</span></span>
+      <span id="user-slot"></span>
       <button class="icon-btn" id="theme-btn" aria-label="theme">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.4"></circle><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M4.9 4.9l1.6 1.6M17.5 17.5l1.6 1.6M19.1 4.9l-1.6 1.6M6.5 17.5l-1.6 1.6"></path></svg>
       </button>
@@ -562,6 +590,15 @@
   const STR = {
     en: {
       footer: "webo · self-hosted health panel",
+      signIn: "Sign in to continue.", signInGoogle: "Sign in with Google",
+      signInFailed: "Could not start the login — check CLERK_PUBLISHABLE_KEY on the server.",
+      notAllowed: (e) => `${e} is not on this server's allowlist. Ask an admin to add you.`,
+      signOut: "Sign out",
+      authTitle: "Authorize this machine", authWhose: (e) => `Signed in as ${e}`,
+      authCheck: "Check that the code below is the one your terminal is showing.",
+      authGo: "Authorize", authDone: "Authorized. You can go back to the terminal.",
+      authFail: (m) => `Could not authorize: ${m}`, authNoCode: "This link has no code in it.",
+      authWait: "Authorizing…",
       scopeServer: "Server", scopeProjects: "Projects", scopeNew: "+ new project",
       upFor: (d) => `up for ${d}`, down: "offline",
       tabOverview: "Overview", tabProcesses: "Processes", tabProjects: "Projects",
@@ -681,6 +718,15 @@
     },
     pt: {
       footer: "webo · painel de saúde self-hosted",
+      signIn: "Entre para continuar.", signInGoogle: "Entrar com Google",
+      signInFailed: "Não consegui iniciar o login — confira CLERK_PUBLISHABLE_KEY no servidor.",
+      notAllowed: (e) => `${e} não está na allowlist deste servidor. Peça para um admin liberar.`,
+      signOut: "Sair",
+      authTitle: "Autorizar esta máquina", authWhose: (e) => `Logado como ${e}`,
+      authCheck: "Confira que o código abaixo é o mesmo que o seu terminal está mostrando.",
+      authGo: "Autorizar", authDone: "Autorizado. Pode voltar para o terminal.",
+      authFail: (m) => `Não consegui autorizar: ${m}`, authNoCode: "Este link não tem código.",
+      authWait: "Autorizando…",
       scopeServer: "Servidor", scopeProjects: "Projetos", scopeNew: "+ novo projeto",
       upFor: (d) => `no ar há ${d}`, down: "fora do ar",
       tabOverview: "Visão geral", tabProcesses: "Processos", tabProjects: "Projetos",
@@ -835,7 +881,7 @@
   const fmtClock = (ts) => new Date(ts * 1000).toLocaleString(LOCALE, { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const debounce = (fn, ms) => { let h; return (...a) => { clearTimeout(h); h = setTimeout(() => fn(...a), ms); }; };
   async function api(path, opts) {
-    const r = await fetch(path, opts);
+    const r = await apiFetch(path, opts);
     const json = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(json.error || `HTTP ${r.status}`);
     return json;
@@ -1945,7 +1991,7 @@
     });
     $("db-drop")?.addEventListener("click", async () => {
       if (!confirm(t("dropDbConfirm"))) return;
-      try { await fetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/database`, { method: "DELETE" }); D.database = undefined; D.tables = []; render(); } catch {}
+      try { await apiFetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/database`, { method: "DELETE" }); D.database = undefined; D.tables = []; render(); } catch {}
     });
 
     const drawSide = () => {
@@ -2295,7 +2341,7 @@
           const id = Number(b.dataset.id), action = b.dataset.one;
           if (action === "delete") {
             if (!confirm(t("deleteIssuesConfirm", 1))) return;
-            await fetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/errors/${id}`, { method: "DELETE" });
+            await apiFetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/errors/${id}`, { method: "DELETE" });
           } else {
             await api(`/api/v1/projects/${encodeURIComponent(S.scope)}/errors/${id}`, jbody("PUT", { state: action === "resolve" ? "resolved" : action }));
           }
@@ -2395,7 +2441,7 @@
         <div style="padding:0 20px 14px"><span class="sub">${t("connectOwn")}</span></div>`}`;
       $("dm-copy")?.addEventListener("click", async () => { if (await toClipboard(d.auto_domain)) flashCopied($("dm-copy")); });
       $("dm-disc")?.addEventListener("click", async () => {
-        await fetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/domain`, { method: "DELETE" });
+        await apiFetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/domain`, { method: "DELETE" });
         S.detail = null; render();
       });
       $("dm-conn")?.addEventListener("click", async () => {
@@ -2462,7 +2508,7 @@
           }));
         rowsHost.querySelectorAll("[data-del]").forEach((b) =>
           b.addEventListener("click", async () => {
-            await fetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/env?key=${encodeURIComponent(b.dataset.del)}`, { method: "DELETE" });
+            await apiFetch(`/api/v1/projects/${encodeURIComponent(S.scope)}/env?key=${encodeURIComponent(b.dataset.del)}`, { method: "DELETE" });
             drawEnv();
           }));
       };
@@ -2585,14 +2631,188 @@
     renderTabs();
   }
 
+  // ---------- login ----------
+  //
+  // webo runs in two modes and the server decides which: with no Clerk keys
+  // it is the panel it always was, open, and none of this code runs. With
+  // them, nothing renders until there is a session, and every call to our own
+  // API carries its token.
+  const AUTH = { mode: "local", clerk: null, token: null, email: null };
+
+  /// Every call to webo's own API goes through here so the credential is
+  /// attached in exactly one place. Replacing window.fetch would have covered
+  /// call sites we forget — and it also broke clerk-js, which does its own
+  /// fetching: a global hook is not worth a broken login.
+  function apiFetch(path, opts = {}) {
+    if (!AUTH.token) return fetch(path, opts);
+    const headers = new Headers(opts.headers || {});
+    headers.set("authorization", `Bearer ${AUTH.token}`);
+    return fetch(path, { ...opts, headers });
+  }
+
+  const gate = document.getElementById("gate");
+  const gateBody = document.getElementById("gate-body");
+  const showGate = (html) => { gate.hidden = false; gateBody.innerHTML = html; };
+  const hideGate = () => { gate.hidden = true; document.getElementById("wrap").hidden = false; };
+  const gateMessage = (text, bad) => showGate(`<div class="gate-msg${bad ? " bad" : ""}">${text}</div>`);
+
+  /// Loads clerk-js from the instance in the publishable key. The script is
+  /// served by the same Clerk instance that will verify the token, so there is
+  /// no third host to trust.
+  function loadClerk(publishableKey) {
+    const domain = (() => {
+      try { return atob(publishableKey.replace(/^pk_(test|live)_/, "")).replace(/\$$/, ""); }
+      catch { return null; }
+    })();
+    if (!domain) return Promise.reject(new Error("bad publishable key"));
+    return new Promise((resolve, reject) => {
+      const el = document.createElement("script");
+      el.async = true;
+      el.crossOrigin = "anonymous";
+      el.dataset.clerkPublishableKey = publishableKey;
+      el.src = `https://${domain}/npm/@clerk/clerk-js@5/dist/clerk.browser.js`;
+      el.onload = () => resolve(window.Clerk);
+      el.onerror = () => reject(new Error("clerk-js did not load"));
+      document.head.appendChild(el);
+    });
+  }
+
+  /// Google only, in webo's own colours — the team is closed, so an email
+  /// form would just be a slower way to be refused.
+  const clerkAppearance = () => {
+    // Clerk computes its own shades from concrete colours, so these are hex
+    // rather than the theme's variables — and they follow the panel's theme.
+    // "light" can come from an explicit choice or from the system, and the
+    // card has to match either way — a dark palette on a light page was the
+    // first version of this and it read as a rendering bug.
+    const explicit = document.documentElement.dataset.theme;
+    const light = explicit
+      ? explicit === "light"
+      : window.matchMedia("(prefers-color-scheme: light)").matches;
+    return {
+      variables: light
+        ? { colorPrimary: "#4f8bff", borderRadius: "12px", fontFamily: "'IBM Plex Sans', system-ui, sans-serif" }
+        : {
+            colorPrimary: "#4f8bff",
+            colorBackground: "#0c1630",
+            colorText: "#eaf0fd",
+            colorTextSecondary: "#a2b4d4",
+            colorInputBackground: "#16224a",
+            colorInputText: "#eaf0fd",
+            colorNeutral: "#eaf0fd",
+            colorDanger: "#ff8f8f",
+            borderRadius: "12px",
+            fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+          },
+      layout: { unsafe_disableDevelopmentModeWarnings: true },
+      // Google is the only way in, and that is enforced on the Clerk instance
+      // rather than by hiding fields here: CSS that hides the email form also
+      // hides the social buttons, which is exactly the empty card this
+      // replaced. "Sign up" is the one thing left to trim — the team is
+      // closed, so it leads nowhere.
+      elements: { footerAction: { display: "none" } },
+    };
+  };
+
+  async function startSession(publishableKey) {
+    // clerk-js takes a few seconds on a cold load. Showing the shape of the
+    // card that is coming beats an empty screen that reads as broken.
+    showGate(`
+      <div style="display:flex;flex-direction:column;align-items:center;gap:14px;width:100%">
+        <div class="gate-msg">${t("signIn")}</div>
+        <div style="width:100%;height:190px;border:1px solid var(--stroke);border-radius:16px;background:var(--card);
+                    display:grid;place-items:center">
+          <div class="spinner" style="width:22px;height:22px;border:2px solid var(--stroke);border-top-color:var(--accent);
+                                      border-radius:99px;animation:spin 1s linear infinite"></div>
+        </div>
+      </div>`);
+    const Clerk = await loadClerk(publishableKey);
+    await Clerk.load({ appearance: clerkAppearance() });
+    AUTH.clerk = Clerk;
+    if (!Clerk.user) {
+      showGate(`<div class="gate-msg">${t("signIn")}</div><div id="clerk-signin"></div>`);
+      Clerk.mountSignIn(document.getElementById("clerk-signin"), {
+        appearance: clerkAppearance(),
+        forceRedirectUrl: location.pathname + location.search,
+      });
+      return null;
+    }
+    AUTH.email = Clerk.user.primaryEmailAddress?.emailAddress || "";
+    AUTH.token = await Clerk.session.getToken();
+    // A session token is short-lived; refreshing it well before it expires
+    // keeps a long-open panel from failing on the next poll.
+    setInterval(async () => {
+      try { AUTH.token = await Clerk.session.getToken(); } catch {}
+    }, 45000);
+    Clerk.mountUserButton(document.getElementById("user-slot"), { appearance: clerkAppearance() });
+    return AUTH.email;
+  }
+
+  // ---------- the authorization page ----------
+  //
+  // What a person sees when an agent asks for access: the code it is showing,
+  // and one button. The email that ends up on the token comes from the
+  // session, never from anything the agent sent.
+  async function renderAuthorize() {
+    const code = new URLSearchParams(location.search).get("code");
+    if (!code) return gateMessage(t("authNoCode"), true);
+    const who = AUTH.email ? `<div class="gate-msg">${t("authWhose", AUTH.email)}</div>` : "";
+    showGate(`
+      <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+        <div style="font-size:17px;font-weight:600">${t("authTitle")}</div>
+        <div class="gate-msg">${t("authCheck")}</div>
+        <div class="gate-code">${code.toUpperCase()}</div>
+        ${who}
+        <div class="gate-actions"><button class="btn-primary" id="auth-go">${t("authGo")}</button></div>
+        <div class="gate-msg" id="auth-out"></div>
+      </div>`);
+    const out = document.getElementById("auth-out");
+    document.getElementById("auth-go").addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      out.textContent = t("authWait");
+      try {
+        await api("/api/device/approve", jbody("POST", { code }));
+        out.className = "gate-msg";
+        out.textContent = t("authDone");
+        e.target.remove();
+      } catch (err) {
+        out.className = "gate-msg bad";
+        out.textContent = t("authFail", err.message);
+        e.target.disabled = false;
+      }
+    });
+  }
+
   // ---------- boot ----------
   (async () => {
     document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+
+    // The server decides whether there is a login at all.
+    let cfg = { mode: "local" };
+    try { cfg = await api("/api/config"); } catch {}
+    AUTH.mode = cfg.mode;
+    if (cfg.mode === "server") {
+      try {
+        const email = await startSession(cfg.clerk_publishable_key);
+        if (!email) return; // the sign-in card is up; this run ends here
+      } catch (e) {
+        return gateMessage(t("signInFailed"), true);
+      }
+    }
+    if (location.pathname === "/authorize") return renderAuthorize();
+
+    // A session Clerk accepts can still be refused here: the allowlist lives
+    // on the server, and being signed in is not the same as being allowed.
     try {
       const [sys, snap] = await Promise.all([api("/api/v1/system"), api("/api/v1/snapshot")]);
       S.system = sys; S.snapshot = snap;
       renderUpChip();
-    } catch {}
+    } catch (e) {
+      if (AUTH.mode === "server" && /not authenticated/i.test(e.message)) {
+        return gateMessage(t("notAllowed", AUTH.email || "this account"), true);
+      }
+    }
+    hideGate();
     await loadProjects();
     setInterval(loadProjects, 30000); // survives render(): it feeds the scope menu everywhere
     render();

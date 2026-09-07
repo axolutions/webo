@@ -32,7 +32,7 @@ pub fn app(api: Api) -> Router {
 
 // ---------------------------------------------------------------- JSON-RPC
 
-async fn rpc(AxumState(api): AxumState<Api>, Json(req): Json<Value>) -> impl IntoResponse {
+pub(crate) async fn rpc(AxumState(api): AxumState<Api>, Json(req): Json<Value>) -> impl IntoResponse {
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(json!({}));

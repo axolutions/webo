@@ -1731,6 +1731,56 @@ pub(crate) mod tests {
         assert!(cfg.get("clerk_publishable_key").is_none(), "no key to leak in local mode");
     }
 
+    /// The other half of the gate: a Clerk session, not a personal token.
+    /// This is what the panel sends on every call once someone signs in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_signed_in_person_gets_in_and_can_authorize_a_machine() {
+        let _lock = crate::testutil::env_lock();
+        let (auth, session) = crate::auth::fake_clerk_session(Some(vec!["murilo@example.com"])).await;
+        let mut api = api_with_data();
+        api.auth = Some(Arc::new(auth));
+
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", Some(&session)).await, StatusCode::OK);
+        assert_eq!(call(api.clone(), "GET", "/api/team", Some(&session)).await, StatusCode::OK);
+
+        // approving a device code takes that session — and binds the token to
+        // the email in it, not to anything the agent sent
+        let (_, start) = post_json(api.clone(), "/api/device/start", serde_json::json!({})).await;
+        let code = start["code"].as_str().unwrap().to_string();
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/device/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {session}"))
+                    .body(Body::from(serde_json::json!({ "code": code }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, poll) = get_on(api.clone(), &format!("/api/device/poll?code={code}")).await;
+        assert_eq!(poll["email"], "Murilo@Example.com", "the approver, from the session");
+
+        // a code that was never opened cannot be approved into existence
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/device/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {session}"))
+                    .body(Body::from(r#"{"code":"ZZZZ-ZZZZ"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        std::env::remove_var("WEBO_CLERK_API_BASE");
+    }
+
     #[tokio::test]
     async fn the_browser_authorization_hands_over_one_token_and_only_one() {
         let (api, _) = locked_api(Some(vec!["murilo@example.com"]));

@@ -139,7 +139,13 @@ impl Auth {
             }
         }
         // cold cache, or a kid we have never seen (key rotation): refetch
-        let url = format!("https://{}/.well-known/jwks.json", self.frontend_api);
+        let url = if self.frontend_api.starts_with("http://") {
+            // only a test points this at plain http; production keys always
+            // decode to a hostname, which is fetched over TLS below
+            format!("{}/.well-known/jwks.json", self.frontend_api)
+        } else {
+            format!("https://{}/.well-known/jwks.json", self.frontend_api)
+        };
         let jwks: Jwks = ureq::get(&url)
             .timeout(Duration::from_secs(10))
             .call()
@@ -179,7 +185,8 @@ impl Auth {
             primary_email_address_id: Option<String>,
             email_addresses: Vec<ClerkEmail>,
         }
-        let raw: Vec<ClerkUser> = ureq::get("https://api.clerk.com/v1/users?limit=100&order_by=-created_at")
+        let base = std::env::var("WEBO_CLERK_API_BASE").unwrap_or_else(|_| "https://api.clerk.com".into());
+        let raw: Vec<ClerkUser> = ureq::get(&format!("{base}/v1/users?limit=100&order_by=-created_at"))
             .set("Authorization", &format!("Bearer {}", self.secret_key))
             .timeout(Duration::from_secs(10))
             .call()
@@ -286,10 +293,33 @@ fn random_hex(bytes: usize) -> String {
 /// reach Clerk fails as an unreachable instance rather than silently passing.
 #[cfg(test)]
 pub fn offline_auth(allowed: Option<Vec<&str>>) -> Auth {
+    with_frontend_api("offline.invalid", allowed)
+}
+
+/// A whole fake Clerk instance plus a session token it signed, so the tests
+/// that exercise the panel's gate can use a real JWT instead of pretending.
+#[cfg(test)]
+pub async fn fake_clerk_session(allowed: Option<Vec<&str>>) -> (Auth, String) {
+    let base = tests::fake_clerk().await;
+    std::env::set_var("WEBO_CLERK_API_BASE", &base);
+    let token = tests::sign(
+        serde_json::json!({ "sub": "user_1" }),
+        "k1",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 600,
+    );
+    (with_frontend_api(&base, allowed), token)
+}
+
+#[cfg(test)]
+pub fn with_frontend_api(frontend_api: &str, allowed: Option<Vec<&str>>) -> Auth {
     Auth {
         publishable_key: "pk_test_offline".into(),
         secret_key: "sk_test_offline".into(),
-        frontend_api: "offline.invalid".into(),
+        frontend_api: frontend_api.into(),
         allowed: allowed.map(|l| l.iter().map(|e| e.to_lowercase()).collect()),
         jwks: Mutex::new(None),
         users: Mutex::new(None),
@@ -299,6 +329,141 @@ pub fn offline_auth(allowed: Option<Vec<&str>>) -> Auth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A throwaway RSA key, generated once for these tests. It signs the
+    /// tokens a fake Clerk instance hands out, and its public half is served
+    /// as that instance's JWKS — which is exactly what verification checks.
+    const TEST_KEY: &str = include_str!("../tests/fixtures/clerk-test-key.pem");
+    const TEST_N: &str = "zUnjm9Yonyk0cerArpd7sOv1wDHKfIbchmw4WTnEVL8jHKUbhextsvK1ArrnletOBzndKI9nbF-sg5vZme9sj_JESvsmt3HvPgkeE5ZHMAlu0ZuPVlIHjyWg0268D7P_UFIt02qtNmAmHt6s7H9uwv4epQuRTE_O4cVW1xaEatukeCosYPH27OalfxLdR7sKPnf5_0C7JBLF86T5scQM8Nh_AKlzgGGXSDvuOGGM_eR-AC9ETdmZizLBj2f3lN0n0tVWgrChsOmX5HsH3FyMqBGW-429Ea0sH8oIiuw3SZLrcyShRFtq1ZHgc5oWWsZyeGs054o0dNoFTOFgc0WVfQ";
+    const TEST_E: &str = "AQAB";
+
+    pub(super) fn sign(claims: serde_json::Value, kid: &str, exp: i64) -> String {
+        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
+        header.kid = Some(kid.into());
+        let mut body = claims;
+        body["exp"] = serde_json::json!(exp);
+        jsonwebtoken::encode(
+            &header,
+            &body,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(TEST_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// A Clerk instance that only exists for this test: it serves the JWKS for
+    /// the key above and one user.
+    pub(super) async fn fake_clerk() -> String {
+        use axum::routing::get;
+        let router = axum::Router::new()
+            .route(
+                "/.well-known/jwks.json",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "keys": [
+                            { "kid": "k1", "kty": "RSA", "n": TEST_N, "e": TEST_E },
+                            // a key we cannot parse must not poison the rest
+                            { "kid": "broken", "kty": "RSA", "n": "!!!", "e": "!!!" },
+                        ]
+                    }))
+                }),
+            )
+            .route(
+                "/v1/users",
+                get(|| async {
+                    axum::Json(serde_json::json!([
+                        {
+                            "id": "user_1",
+                            "first_name": "Murilo",
+                            "image_url": "https://example.com/a.png",
+                            "primary_email_address_id": "e1",
+                            "email_addresses": [
+                                { "id": "e0", "email_address": "old@example.com" },
+                                { "id": "e1", "email_address": "Murilo@Example.com" }
+                            ]
+                        },
+                        {
+                            "id": "user_2",
+                            "first_name": null,
+                            "image_url": null,
+                            "primary_email_address_id": null,
+                            "email_addresses": [{ "id": "e2", "email_address": "gustavo@example.com" }]
+                        }
+                    ]))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_is_only_accepted_when_this_instance_signed_it() {
+        let _lock = crate::testutil::env_lock();
+        let base = fake_clerk().await;
+        std::env::set_var("WEBO_CLERK_API_BASE", &base);
+        let auth = with_frontend_api(&base, Some(vec!["murilo@example.com"]));
+
+        // a real session: signed by the instance, unexpired, on the allowlist
+        let token = sign(serde_json::json!({ "sub": "user_1" }), "k1", now() + 600);
+        let user = auth.session_user(&token).unwrap();
+        assert_eq!(user.email, "Murilo@Example.com", "the primary address, not the first");
+        assert_eq!(user.name, "Murilo");
+
+        // the whole team is readable, and someone with no first name is named
+        // by their address rather than left blank
+        let team = auth.team().unwrap();
+        assert_eq!(team.len(), 2);
+        assert_eq!(team[1].name, "gustavo");
+
+        // expired
+        let old = sign(serde_json::json!({ "sub": "user_1" }), "k1", now() - 60);
+        assert!(auth.session_user(&old).unwrap_err().contains("session rejected"));
+
+        // signed by a key this instance does not have
+        let stranger = sign(serde_json::json!({ "sub": "user_1" }), "nope", now() + 600);
+        assert!(auth.session_user(&stranger).unwrap_err().contains("not in this instance"));
+
+        // not a token at all
+        assert!(auth.session_user("garbage").unwrap_err().contains("malformed"));
+        // a token with no kid cannot be checked against anything
+        let no_kid = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(Algorithm::RS256),
+            &serde_json::json!({ "sub": "user_1", "exp": now() + 600 }),
+            &jsonwebtoken::EncodingKey::from_rsa_pem(TEST_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert!(auth.session_user(&no_kid).unwrap_err().contains("no kid"));
+
+        // a valid session for someone who is not in the instance
+        let ghost = sign(serde_json::json!({ "sub": "user_404" }), "k1", now() + 600);
+        assert!(auth.session_user(&ghost).unwrap_err().contains("not in this Clerk instance"));
+
+        // signed, unexpired, real user — and still refused by the allowlist
+        let auth = with_frontend_api(&base, Some(vec!["someone@else.com"]));
+        assert!(auth.session_user(&token).unwrap_err().contains("not on WEBO_ALLOWED_EMAILS"));
+
+        std::env::remove_var("WEBO_CLERK_API_BASE");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreachable_clerk_refuses_rather_than_lets_through() {
+        let _lock = crate::testutil::env_lock();
+        std::env::set_var("WEBO_CLERK_API_BASE", "http://127.0.0.1:1");
+        let auth = with_frontend_api("http://127.0.0.1:1", None);
+        let token = sign(serde_json::json!({ "sub": "user_1" }), "k1", now() + 600);
+        let err = auth.session_user(&token).unwrap_err();
+        assert!(err.contains("JWKS"), "{err}");
+        assert!(auth.team().is_err(), "no team list means no answer, not an empty team");
+        std::env::remove_var("WEBO_CLERK_API_BASE");
+    }
 
     #[test]
     fn the_frontend_api_comes_out_of_the_publishable_key() {

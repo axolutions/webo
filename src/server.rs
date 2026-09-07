@@ -759,7 +759,7 @@ async fn database_drop(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<
     Json(serde_json::json!({ "dropped": true })).into_response()
 }
 
-async fn run_sql(api: &Api, slug: &str, sql: &str, write: bool) -> Result<String, (StatusCode, String)> {
+pub(crate) async fn run_sql(api: &Api, slug: &str, sql: &str, write: bool) -> Result<String, (StatusCode, String)> {
     let Ok(Some(p)) = api.store.project_by_slug(slug) else {
         return Err((StatusCode::NOT_FOUND, "project not found".into()));
     };
@@ -838,7 +838,7 @@ async fn database_query(
 
 /// The tables a project's database actually has — table names coming from
 /// the URL are only ever used after membership here, which kills injection.
-async fn table_names(api: &Api, slug: &str) -> Result<(String, Vec<String>), (StatusCode, String)> {
+pub(crate) async fn table_names(api: &Api, slug: &str) -> Result<(String, Vec<String>), (StatusCode, String)> {
     let Ok(Some(p)) = api.store.project_by_slug(slug) else {
         return Err((StatusCode::NOT_FOUND, "project not found".into()));
     };
@@ -855,7 +855,7 @@ async fn table_names(api: &Api, slug: &str) -> Result<(String, Vec<String>), (St
     Ok((database.kind, parsed.rows.iter().filter_map(|r| r.first().cloned()).collect()))
 }
 
-fn ident_ok(s: &str) -> bool {
+pub(crate) fn ident_ok(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')

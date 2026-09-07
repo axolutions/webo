@@ -256,9 +256,9 @@ async fn github_repos(AxumState(api): AxumState<Api>) -> impl IntoResponse {
 }
 
 #[derive(Deserialize)]
-struct CreateProject {
-    repo_owner: String,
-    repo_name: String,
+pub(crate) struct CreateProject {
+    pub(crate) repo_owner: String,
+    pub(crate) repo_name: String,
 }
 
 fn valid_repo_part(s: &str) -> bool {
@@ -305,11 +305,23 @@ async fn project_create(
     AxumState(api): AxumState<Api>,
     Json(req): Json<CreateProject>,
 ) -> impl IntoResponse {
+    match do_create_project(&api, req).await {
+        Ok(v) => Json(v).into_response(),
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+/// Registering a repo as a project: detect the stack, keep the plan. Shared by
+/// HTTP and MCP so the detection cannot drift between them.
+pub(crate) async fn do_create_project(
+    api: &Api,
+    req: CreateProject,
+) -> Result<serde_json::Value, (StatusCode, String)> {
     let Some(token) = github_token() else {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "github token not configured");
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "github token not configured".into()));
     };
     if !valid_repo_part(&req.repo_owner) || !valid_repo_part(&req.repo_name) {
-        return err(StatusCode::BAD_REQUEST, "invalid repository");
+        return Err((StatusCode::BAD_REQUEST, "invalid repository".into()));
     }
     let (owner, name) = (req.repo_owner.clone(), req.repo_name.clone());
     let scan = tokio::task::spawn_blocking({
@@ -320,29 +332,22 @@ async fn project_create(
     .ok()
     .flatten();
     let Some(scan) = scan else {
-        return err(StatusCode::NOT_FOUND, "repository not found or unreadable");
+        return Err((StatusCode::NOT_FOUND, "repository not found or unreadable".into()));
     };
     let Some(template) = scan.template else {
-        return Json(serde_json::json!({
-            "supported": false,
-            "language": scan.language,
-        }))
-        .into_response();
+        return Ok(serde_json::json!({ "supported": false, "language": scan.language }));
     };
     let tech = match template {
         scaffold::Template::Rails => "ruby",
         scaffold::Template::Next => "next",
     };
     let slug = projects::slug_for(&name);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = now_secs();
     if api.store.register(&slug, &owner, &name, tech, now).is_err() {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, "could not register the project");
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "could not register the project".into()));
     }
     let files = scaffold::plan(template, &slug, &owner, &name, &scan.branch, scan.has_dockerfile, &scan.ruby);
-    Json(serde_json::json!({
+    Ok(serde_json::json!({
         "supported": true,
         "slug": slug,
         "template": template,
@@ -353,20 +358,19 @@ async fn project_create(
         "files": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
         "secrets": secrets_json(),
     }))
-    .into_response()
 }
 
 #[derive(Deserialize, Default)]
-struct ProvisionReq {
-    /// "managed" (default when the repo expects DATABASE_URL) | "external" | "none"
-    db: Option<String>,
+pub(crate) struct ProvisionReq {
+    /// "managed" | "external" | "none"
+    pub(crate) db: Option<String>,
     /// managed only: "17" | "16" | "15"
-    pg_version: Option<String>,
+    pub(crate) pg_version: Option<String>,
     /// external only: the connection string webo stores as DATABASE_URL
-    database_url: Option<String>,
-    /// extra variables typed in the wizard's credentials step
+    pub(crate) database_url: Option<String>,
+    /// variables to write before the first deploy
     #[serde(default)]
-    env: std::collections::BTreeMap<String, String>,
+    pub(crate) env: std::collections::BTreeMap<String, String>,
 }
 
 async fn project_provision(
@@ -374,25 +378,37 @@ async fn project_provision(
     AxumPath(slug): AxumPath<String>,
     body: Option<Json<ProvisionReq>>,
 ) -> impl IntoResponse {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    match do_provision(&api, &slug, body.map(|b| b.0).unwrap_or_default()).await {
+        Ok(value) => Json(value).into_response(),
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+/// The first deploy, start to finish. HTTP and MCP both call this — the order
+/// of operations here is load-bearing and must not exist twice.
+pub(crate) async fn do_provision(
+    api: &Api,
+    slug: &str,
+    req: ProvisionReq,
+) -> Result<serde_json::Value, (StatusCode, String)> {
     let Some(token) = github_token() else {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "github token not configured");
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "github token not configured".into()));
     };
-    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
-        return err(StatusCode::NOT_FOUND, "project not found");
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
     };
     let (Some(owner), Some(name)) = (p.repo_owner.clone(), p.repo_name.clone()) else {
-        return err(StatusCode::BAD_REQUEST, "project has no repository connected");
+        return Err((StatusCode::BAD_REQUEST, "project has no repository connected".into()));
     };
 
-    // wizard choices land BEFORE the commit: the first deploy must already
-    // find its DATABASE_URL and variables in the app's .env
+    // choices land BEFORE the commit: the first deploy must already find its
+    // DATABASE_URL and variables in the app's .env
     let mut database_json = serde_json::Value::Null;
     match req.db.as_deref() {
         Some("managed") => {
             if api.store.database(p.id).ok().flatten().is_none() {
                 let version = req.pg_version.clone().unwrap_or_else(|| "17".into());
-                match db::create_postgres(&slug, &app_network(), &version).await {
+                match db::create_postgres(slug, &app_network(), &version).await {
                     Ok(mut database) => {
                         database.created_at = now_secs();
                         let url = db::database_url(
@@ -405,13 +421,16 @@ async fn project_provision(
                         let _ = api.store.set_env(p.id, "DATABASE_URL", &url, true);
                         database_json = serde_json::to_value(&database).unwrap_or_default();
                     }
-                    Err(e) => return err(StatusCode::BAD_GATEWAY, &format!("database: {e}")),
+                    Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("database: {e}"))),
                 }
             }
         }
         Some("external") => {
             let Some(url) = req.database_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) else {
-                return err(StatusCode::BAD_REQUEST, "external database needs its connection string");
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "external database needs its connection string".into(),
+                ));
             };
             let _ = api.store.set_env(p.id, "DATABASE_URL", url, false);
         }
@@ -423,14 +442,14 @@ async fn project_provision(
             continue;
         }
         if api.store.env_vars(p.id).unwrap_or_default().iter().any(|v| v.key == key && v.managed) {
-            continue; // the wizard never overwrites a managed value
+            continue; // never overwrite a value webo manages
         }
         let _ = api.store.set_env(p.id, key, value, false);
     }
-    let env_written = materialize_env(&api, &slug).await.is_ok();
+    let env_written = materialize_env(api, slug).await.is_ok();
 
     let result = tokio::task::spawn_blocking({
-        let (token, owner, name, slug) = (token.clone(), owner.clone(), name.clone(), slug.clone());
+        let (token, owner, name, slug) = (token.clone(), owner.clone(), name.clone(), slug.to_string());
         move || {
             let scan = scan_repo(&token, &owner, &name).ok_or("repository unreadable")?;
             let template = scan.template.ok_or("technology not supported")?;
@@ -465,15 +484,15 @@ async fn project_provision(
 
     match result {
         Ok(Ok((sha, files, secrets))) => {
-            let _ = api.store.set_status(&slug, Some("deploying"));
-            let domain = reserve_domain(&api, &slug).await;
+            let _ = api.store.set_status(slug, Some("deploying"));
+            let domain = reserve_domain(api, slug).await;
             tokio::spawn(github::watch_first_deploy(
                 api.store.clone(),
-                slug.clone(),
+                slug.to_string(),
                 owner,
                 name,
             ));
-            Json(serde_json::json!({
+            Ok(serde_json::json!({
                 "commit_sha": sha,
                 "files": files.iter().map(|f| &f.path).collect::<Vec<_>>(),
                 "secrets": secrets,
@@ -481,10 +500,9 @@ async fn project_provision(
                 "database": database_json,
                 "env_written": env_written,
             }))
-            .into_response()
         }
-        Ok(Err(msg)) => err(StatusCode::BAD_GATEWAY, &msg),
-        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "provision task failed"),
+        Ok(Err(msg)) => Err((StatusCode::BAD_GATEWAY, msg)),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, "provision task failed".into())),
     }
 }
 
@@ -493,11 +511,24 @@ async fn project_delete(
     AxumPath(slug): AxumPath<String>,
     Json(opts): Json<projects::TeardownOpts>,
 ) -> impl IntoResponse {
-    if slug == "webo" {
-        return err(StatusCode::FORBIDDEN, "webo cannot delete itself");
+    match do_delete_project(&api, &slug, opts).await {
+        Ok(v) => Json(v).into_response(),
+        Err((code, msg)) => err(code, &msg),
     }
-    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
-        return err(StatusCode::NOT_FOUND, "project not found");
+}
+
+/// Tearing a project down. The caller decides how far it goes: MCP only ever
+/// asks for containers, the panel can also ask for volumes and images.
+pub(crate) async fn do_delete_project(
+    api: &Api,
+    slug: &str,
+    opts: projects::TeardownOpts,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    if slug == "webo" {
+        return Err((StatusCode::FORBIDDEN, "webo cannot delete itself".into()));
+    }
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
     };
     let compose = p.compose_project.clone().unwrap_or_else(|| p.slug.clone());
     let report = projects::teardown(&compose, opts).await;
@@ -513,16 +544,15 @@ async fn project_delete(
         }
     }
     let _ = api.store.delete_logs(p.id);
-    let _ = api.store.delete_project(&slug);
-    api.state.write().await.projects_live.remove(&slug);
-    sync_routes(&api).await;
-    Json(serde_json::json!({
+    let _ = api.store.delete_project(slug);
+    api.state.write().await.projects_live.remove(slug);
+    sync_routes(api).await;
+    Ok(serde_json::json!({
         "deleted": true,
         "containers_removed": report.containers_removed,
         "volumes_removed": report.volumes_removed,
         "images_removed": report.images_removed,
     }))
-    .into_response()
 }
 
 /// Reserves the project's auto domain (once) and publishes its tunnel route.
@@ -594,21 +624,34 @@ async fn domain_connect(
     AxumPath(slug): AxumPath<String>,
     Json(req): Json<DomainReq>,
 ) -> impl IntoResponse {
-    let Some(cf) = cloudflare::Cloudflare::from_env() else {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "cloudflare not configured");
-    };
-    let host = req.domain.trim().trim_start_matches("https://").trim_end_matches('/').to_string();
-    if !cloudflare::valid_hostname(&host) {
-        return err(StatusCode::BAD_REQUEST, "invalid domain");
+    match do_connect_domain(&api, &slug, &req.domain).await {
+        Ok(v) => Json(v).into_response(),
+        Err((code, msg)) => err(code, &msg),
     }
-    if api.store.project_by_slug(&slug).ok().flatten().is_none() {
-        return err(StatusCode::NOT_FOUND, "project not found");
+}
+
+/// Connecting a custom domain: creates the DNS record inside webo's own zone,
+/// and outside it says which CNAME to point. Shared by HTTP and MCP.
+pub(crate) async fn do_connect_domain(
+    api: &Api,
+    slug: &str,
+    domain: &str,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let Some(cf) = cloudflare::Cloudflare::from_env() else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "cloudflare not configured".into()));
+    };
+    let host = domain.trim().trim_start_matches("https://").trim_end_matches('/').to_string();
+    if !cloudflare::valid_hostname(&host) {
+        return Err((StatusCode::BAD_REQUEST, "invalid domain".into()));
+    }
+    if api.store.project_by_slug(slug).ok().flatten().is_none() {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
     }
     // In our own zone webo creates the CNAME; elsewhere the user points it.
     let in_our_zone = cloudflare::split_host(&host, &cf.apps_zone).is_some();
     let dns = if in_our_zone {
         let label = cloudflare::split_host(&host, &cf.apps_zone).map(|(l, _)| l.to_string()).unwrap_or_default();
-        let slug_owned = slug.clone();
+        let slug_owned = slug.to_string();
         tokio::task::spawn_blocking(move || {
             cloudflare::Cloudflare::from_env().map(|cf| cf.create_dns(&label, &format!("webo: {slug_owned}")))
         })
@@ -620,24 +663,30 @@ async fn domain_connect(
         Ok(())
     };
     if let Err(e) = dns {
-        return err(StatusCode::BAD_GATEWAY, &e);
+        return Err((StatusCode::BAD_GATEWAY, e));
     }
-    let _ = api.store.set_custom_domain(&slug, Some(&host));
-    sync_routes(&api).await;
-    Json(serde_json::json!({
+    let _ = api.store.set_custom_domain(slug, Some(&host));
+    sync_routes(api).await;
+    Ok(serde_json::json!({
         "domain": host,
         "dns_managed": in_our_zone,
         "cname_target": cf.tunnel_target(),
     }))
-    .into_response()
 }
 
 async fn domain_disconnect(
     AxumState(api): AxumState<Api>,
     AxumPath(slug): AxumPath<String>,
 ) -> impl IntoResponse {
-    let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
-        return err(StatusCode::NOT_FOUND, "project not found");
+    match do_disconnect_domain(&api, &slug).await {
+        Ok(()) => Json(serde_json::json!({ "disconnected": true })).into_response(),
+        Err((code, msg)) => err(code, &msg),
+    }
+}
+
+pub(crate) async fn do_disconnect_domain(api: &Api, slug: &str) -> Result<(), (StatusCode, String)> {
+    let Ok(Some(p)) = api.store.project_by_slug(slug) else {
+        return Err((StatusCode::NOT_FOUND, "project not found".into()));
     };
     if let (Some(host), Some(cf)) = (p.custom_domain.clone(), cloudflare::Cloudflare::from_env()) {
         if cloudflare::split_host(&host, &cf.apps_zone).is_some() {
@@ -647,9 +696,9 @@ async fn domain_disconnect(
             .await;
         }
     }
-    let _ = api.store.set_custom_domain(&slug, None);
-    sync_routes(&api).await;
-    Json(serde_json::json!({ "disconnected": true })).into_response()
+    let _ = api.store.set_custom_domain(slug, None);
+    sync_routes(api).await;
+    Ok(())
 }
 
 // ---------- databases and environment variables ----------
@@ -668,7 +717,7 @@ fn now_secs() -> i64 {
 /// Writes the project's variables into <apps dir>/<app>/.env on the SERVER.
 /// webo runs in a container, so `~` here would be the container's own home —
 /// the file is written through a helper container binding the host directory.
-async fn materialize_env(api: &Api, slug: &str) -> Result<(), String> {
+pub(crate) async fn materialize_env(api: &Api, slug: &str) -> Result<(), String> {
     let Ok(Some(p)) = api.store.project_by_slug(slug) else { return Err("project not found".into()) };
     let vars = api.store.env_vars(p.id).map_err(|e| e.to_string())?;
     // webo's own bookkeeping (the ingest key) never reaches the app
@@ -1127,7 +1176,7 @@ async fn env_list(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPath<Strin
     .into_response()
 }
 
-fn mask(value: &str) -> String {
+pub(crate) fn mask(value: &str) -> String {
     let n = value.chars().count();
     if n <= 8 {
         "•".repeat(n.max(4))

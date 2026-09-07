@@ -16,7 +16,12 @@ a battery reading below 100% is normal and not a problem.
 Access paths, in order of preference:
 
 1. **The panel** — `webo.axolutions.com.br`, read-only, behind Cloudflare.
-2. **The MCP server** — port 5051, bound to the Tailscale IP only.
+2. **The MCP server** — port 5051, published only on the host's Tailscale
+   address. webo runs in a container, which has no Tailscale interface of its
+   own, so the listener binds `0.0.0.0` *inside the container* and Docker
+   publishes it on `${WEBO_TAILSCALE_IP}` only. Set that in
+   `~/apps/webo/deploy/.env` from `tailscale ip -4`; without it the port stays
+   on loopback.
 3. **SSH over Tailscale** — `homelab@<tailscale-ip>`. Last resort.
 
 ## Layout on disk

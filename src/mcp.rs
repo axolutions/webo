@@ -2190,6 +2190,197 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn creating_a_project_through_mcp_goes_through_the_same_wizard() {
+        let _env = crate::testutil::env_lock();
+        let base = crate::server::tests::mock_github().await;
+        std::env::set_var("WEBO_GITHUB_API_BASE", &base);
+        std::env::set_var("WEBO_GITHUB_TOKEN", "test-token");
+        std::env::set_var("WEBO_DEPLOY_TOKEN", "deploy-secret");
+        let api = crate::server::tests::api_with_data();
+
+        let body = tool_text(
+            api.clone(),
+            "create_project",
+            json!({ "repo_owner": "muri", "repo_name": "axofin" }),
+        )
+        .await;
+        assert!(body.contains("rails"), "the template is named: {body}");
+        assert!(body.contains(".github/workflows/deploy.yml"), "the files are listed: {body}");
+        assert!(
+            body.to_lowercase().contains("nothing has been deployed")
+                || body.to_lowercase().contains("not deployed"),
+            "it must not read as a finished deploy: {body}"
+        );
+        // the project really exists now, exactly as the panel would have made it
+        let p = api.store.project_by_slug("axofin").unwrap().unwrap();
+        assert_eq!(p.source, "registered");
+
+        // a stack with no template is refused in words, not with an error
+        let body = tool_text(
+            api.clone(),
+            "create_project",
+            json!({ "repo_owner": "muri", "repo_name": "notas" }),
+        )
+        .await;
+        assert!(body.contains("Python"), "{body}");
+        assert!(body.contains("no template"), "{body}");
+
+        let out = rpc_call(api, "tools/call", json!({ "name": "create_project", "arguments": {} })).await;
+        assert!(out["error"]["message"].as_str().unwrap().contains("repo_owner"));
+
+        std::env::remove_var("WEBO_GITHUB_API_BASE");
+        std::env::remove_var("WEBO_GITHUB_TOKEN");
+        std::env::remove_var("WEBO_DEPLOY_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn environment_variables_are_set_and_removed_but_never_shown() {
+        let api = crate::server::tests::api_with_data();
+        let p = api.store.project_by_slug("codo").unwrap().unwrap();
+        api.store.set_env(p.id, "STRIPE_KEY", "sk_live_51H8totallysecret", false).unwrap();
+
+        let body = tool_text(api.clone(), "project_env", json!({ "slug": "codo" })).await;
+        assert!(body.contains("STRIPE_KEY"), "the key is listed: {body}");
+        assert!(!body.contains("51H8totallysecret"), "the value leaked: {body}");
+
+        // setting one answers with the key, never with what was written
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "SMTP_PASSWORD", "value": "hunter2hunter2" }),
+        )
+        .await;
+        assert!(body.contains("SMTP_PASSWORD"), "{body}");
+        assert!(!body.contains("hunter2hunter2"), "the value leaked: {body}");
+        assert_eq!(
+            api.store.env_vars(p.id).unwrap().iter().find(|v| v.key == "SMTP_PASSWORD").unwrap().value,
+            "hunter2hunter2",
+            "it was really stored"
+        );
+
+        // a name the shell could not export is refused before it is stored
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "not a key", "value": "x" }),
+        )
+        .await;
+        assert!(body.contains("not a valid variable name"), "{body}");
+
+        // a managed variable belongs to webo
+        api.store.set_env(p.id, "DATABASE_URL", "postgres://x", true).unwrap();
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "DATABASE_URL", "value": "postgres://mine" }),
+        )
+        .await;
+        assert!(body.contains("managed by webo"), "{body}");
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "delete", "key": "DATABASE_URL" }),
+        )
+        .await;
+        assert!(body.contains("managed by webo") || body.contains("does not exist"), "{body}");
+
+        // set with no value says what is missing instead of storing an empty one
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "ONLY_A_KEY" }),
+        )
+        .await;
+        assert!(body.contains("needs key and value"), "{body}");
+
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "delete", "key": "SMTP_PASSWORD" }),
+        )
+        .await;
+        assert!(body.contains("Removed SMTP_PASSWORD"), "{body}");
+        assert!(
+            !api.store.env_vars(p.id).unwrap().iter().any(|v| v.key == "SMTP_PASSWORD"),
+            "it is really gone"
+        );
+        let body = tool_text(api.clone(), "project_env", json!({ "slug": "codo", "action": "delete" })).await;
+        assert!(body.contains("needs a key"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_domain_is_connected_and_disconnected_through_mcp() {
+        let _env = crate::testutil::env_lock();
+        use axum::routing::{delete as axdelete, get as axget, post as axpost};
+        let router = axum::Router::new()
+            .route(
+                "/zones/{z}/dns_records",
+                axpost(|| async { axum::Json(json!({"success": true, "result": {"id": "rec1"}})) })
+                    .get(|| async { axum::Json(json!({"success": true, "result": [{"id": "rec1"}]})) }),
+            )
+            .route(
+                "/zones/{z}/dns_records/{id}",
+                axdelete(|| async { axum::Json(json!({"success": true, "result": {}})) }),
+            )
+            .route(
+                "/accounts/{a}/cfd_tunnel/{t}/configurations",
+                axget(|| async {
+                    axum::Json(json!({"success": true, "result": {"config": {"ingress": [
+                        {"service": "http_status:404"}]}}}))
+                })
+                .put(|| async { axum::Json(json!({"success": true, "result": {}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        std::env::set_var("WEBO_CF_API_BASE", format!("http://{addr}"));
+        std::env::set_var("CLOUDFLARE_API_TOKEN", "t");
+        std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acc");
+        std::env::set_var("CLOUDFLARE_ZONE_ID", "zone");
+        std::env::set_var("WEBO_TUNNEL_ID", "tun");
+        std::env::set_var("WEBO_APPS_ZONE", "example.com");
+
+        let api = crate::server::tests::api_with_data();
+        let body = tool_text(
+            api.clone(),
+            "connect_domain",
+            json!({ "slug": "codo", "domain": "https://loja.example.com/" }),
+        )
+        .await;
+        assert!(body.contains("loja.example.com"), "{body}");
+        assert_eq!(
+            api.store.project_by_slug("codo").unwrap().unwrap().custom_domain.as_deref(),
+            Some("loja.example.com"),
+            "the domain is really stored: {body}"
+        );
+
+        // a domain outside our zone: webo routes it and says what the owner must do
+        let body = tool_text(
+            api.clone(),
+            "connect_domain",
+            json!({ "slug": "codo", "domain": "app.terceiros.com" }),
+        )
+        .await;
+        assert!(body.contains("cfargotunnel.com"), "it hands over the CNAME target: {body}");
+
+        let body = tool_text(api.clone(), "connect_domain", json!({ "slug": "codo", "domain": "" })).await;
+        assert!(!body.is_empty(), "an empty domain answers something: {body}");
+
+        // disconnecting is the same tool with no domain
+        let body = tool_text(api.clone(), "connect_domain", json!({ "slug": "codo", "action": "disconnect" })).await;
+        assert!(body.to_lowercase().contains("disconnect") || body.to_lowercase().contains("removed"), "{body}");
+        assert_eq!(
+            api.store.project_by_slug("codo").unwrap().unwrap().custom_domain,
+            None,
+            "it is really gone"
+        );
+
+        for var in ["WEBO_CF_API_BASE", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[tokio::test]
     async fn phase_two_tools_declare_that_they_write() {
         let out = rpc_call(crate::server::tests::api_with_data(), "tools/list", json!({})).await;
         let tools = out["result"]["tools"].as_array().unwrap();

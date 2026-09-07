@@ -2323,7 +2323,7 @@ pub(crate) mod tests {
 
     /// A fake GitHub covering the whole wizard: listing, contents, the Git
     /// Data chain, and Actions secrets.
-    async fn mock_github() -> String {
+    pub(crate) async fn mock_github() -> String {
         use axum::routing::{get as axget, post as axpost, put as axput};
         use serde_json::json;
         let sk = crypto_box::SecretKey::generate(&mut crypto_box::aead::OsRng);

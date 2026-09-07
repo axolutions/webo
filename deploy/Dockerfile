@@ -8,6 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src src
 COPY web web
 COPY templates templates
+COPY RUNBOOK.md RUNBOOK.md
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -17,6 +18,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src src
 COPY web web
 COPY templates templates
+COPY RUNBOOK.md RUNBOOK.md
 RUN cargo build --release
 
 FROM debian:trixie-slim

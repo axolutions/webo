@@ -1235,6 +1235,36 @@ mod tests {
         assert!(filtered.contains("No process group matches"), "{filtered}");
     }
 
+    /// The panel image is built from a Dockerfile that copies only what it
+    /// lists. A file pulled in with include_str! that it does not copy compiles
+    /// locally and fails the release build — which is exactly how the runbook
+    /// broke the first deploy of this module.
+    #[test]
+    fn everything_embedded_in_the_binary_is_copied_into_the_image() {
+        let dockerfile = include_str!("../deploy/Dockerfile");
+        let sources = [
+            ("src/mcp.rs", include_str!("mcp.rs")),
+            ("src/server.rs", include_str!("server.rs")),
+            ("src/scaffold.rs", include_str!("scaffold.rs")),
+        ];
+        for (file, body) in sources {
+            // only what ships: everything under #[cfg(test)] is compiled away,
+            // and this very test embeds the Dockerfile to read it
+            let shipped = body.split("#[cfg(test)]").next().unwrap_or(body);
+            for (i, _) in shipped.match_indices("include_str!(\"") {
+                let rest = &shipped[i + 14..];
+                let path = &rest[..rest.find('"').unwrap()];
+                // paths are relative to src/; the Dockerfile copies from the root
+                let top = path.trim_start_matches("../").split('/').next().unwrap();
+                assert!(
+                    dockerfile.contains(&format!("COPY {top}")),
+                    "{file} embeds {path}, but the Dockerfile never copies {top} — \
+                     the release build will fail while cargo test passes"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn resources_carry_the_runbook_and_the_inventory() {
         let api = crate::server::tests::api_with_data();

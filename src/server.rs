@@ -12,11 +12,14 @@ use tokio::sync::RwLock;
 
 pub type Shared = Arc<RwLock<State>>;
 
-/// Everything the handlers need: live state + persistent store.
+/// Everything the handlers need: live state + persistent store, plus the
+/// login when there is one. `auth: None` is webo's local mode — no Clerk keys
+/// in the environment, no login, exactly as it always ran.
 #[derive(Clone)]
 pub struct Api {
     pub state: Shared,
     pub store: Arc<Store>,
+    pub auth: Option<Arc<crate::auth::Auth>>,
 }
 
 /// Versioned API: this is the contract the MCP server will consume later —
@@ -24,6 +27,8 @@ pub struct Api {
 pub fn app(api: Api) -> Router {
     Router::new()
         .route("/", get(index))
+        // The approval page is the same shell: the front routes on the path.
+        .route("/authorize", get(index))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/v1/snapshot", get(snapshot))
         .route("/api/v1/history", get(history))
@@ -51,6 +56,16 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/docker", get(docker_info))
         .route("/api/v1/ingest/{key}", axum::routing::post(ingest_error).options(ingest_preflight))
         .route("/api/v1/github/repos", get(github_repos))
+        .route("/mcp", axum::routing::post(crate::mcp::rpc))
+        // login and authorization
+        .route("/api/config", get(config))
+        .route("/api/team", get(team))
+        .route("/api/device/start", axum::routing::post(device_start))
+        .route("/api/device/poll", get(device_poll))
+        .route("/api/device/approve", axum::routing::post(device_approve))
+        .route("/api/tokens", get(tokens_list))
+        .route("/api/tokens/{hash}", axum::routing::delete(token_revoke))
+        .route_layer(axum::middleware::from_fn_with_state(api.clone(), require_auth))
         .with_state(api)
 }
 
@@ -1595,11 +1610,242 @@ pub(crate) mod tests {
         live.history.push_back(ProjectSample { ts: 1, cpu_pct: 0.3, mem_bytes: 210_000_000, disk_bps: 12_000 });
         st.projects_live.insert("codo".into(), live);
 
-        Api { state: Arc::new(RwLock::new(st)), store: Arc::new(store) }
+        Api { state: Arc::new(RwLock::new(st)), store: Arc::new(store), auth: None }
     }
 
     /// Same request, but against an api instance the test already has —
     /// get_json builds a fresh store, which would not see seeded data.
+    /// The panel with login on, holding one working token.
+    fn locked_api(allowed: Option<Vec<&str>>) -> (Api, String) {
+        let mut api = api_with_data();
+        api.auth = Some(Arc::new(crate::auth::offline_auth(allowed)));
+        let token = crate::auth::new_personal_token();
+        api.store
+            .token_insert(&crate::auth::hash_token(&token), "murilo@example.com", "test")
+            .unwrap();
+        (api, token)
+    }
+
+    async fn call(api: Api, method: &str, path: &str, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().method(method).uri(path);
+        if let Some(t) = bearer {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        let body = if method == "POST" {
+            req = req.header("content-type", "application/json");
+            Body::from("{}")
+        } else {
+            Body::empty()
+        };
+        app(api).oneshot(req.body(body).unwrap()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn with_login_on_nothing_answers_without_a_credential() {
+        let (api, token) = locked_api(Some(vec!["murilo@example.com"]));
+
+        // the data is shut: this is the hole this whole change exists to close
+        for path in [
+            "/api/v1/projects",
+            "/api/v1/snapshot",
+            "/api/v1/system",
+            "/api/v1/docker",
+            "/api/v1/projects/codo",
+            "/api/v1/projects/codo/logs",
+            "/api/v1/projects/codo/env",
+            "/api/v1/github/repos",
+            "/api/tokens",
+        ] {
+            assert_eq!(
+                call(api.clone(), "GET", path, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{path} answered without a credential"
+            );
+        }
+        // and so is the MCP server, which can operate the machine
+        assert_eq!(call(api.clone(), "POST", "/mcp", None).await, StatusCode::UNAUTHORIZED);
+
+        // what has to stay open, stays open
+        for path in ["/", "/authorize", "/healthz", "/api/config"] {
+            assert_ne!(
+                call(api.clone(), "GET", path, None).await,
+                StatusCode::UNAUTHORIZED,
+                "{path} must answer before anyone can log in"
+            );
+        }
+        // the browser error snippet runs in a stranger's browser: it carries a
+        // project ingest key, never a team credential
+        assert_ne!(
+            call(api.clone(), "POST", "/api/v1/ingest/whatever", None).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // a real token gets in
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", Some(&token)).await, StatusCode::OK);
+        assert_eq!(call(api.clone(), "GET", "/api/tokens", Some(&token)).await, StatusCode::OK);
+
+        // and the near misses do not
+        for bad in ["", "webo_", "webo_deadbeef", "nonsense", &token[..token.len() - 1]] {
+            assert_eq!(
+                call(api.clone(), "GET", "/api/v1/projects", Some(bad)).await,
+                StatusCode::UNAUTHORIZED,
+                "{bad:?} was accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_token_dies_with_revocation_and_with_the_allowlist() {
+        let (api, token) = locked_api(Some(vec!["murilo@example.com"]));
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", Some(&token)).await, StatusCode::OK);
+
+        // revoking is immediate — no cache, no next restart
+        assert!(api.store.token_revoke(&crate::auth::hash_token(&token)).unwrap());
+        assert_eq!(
+            call(api.clone(), "GET", "/api/v1/projects", Some(&token)).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        // a token issued before someone left stops working when the list changes
+        let (api, token) = locked_api(Some(vec!["gustavo@example.com"]));
+        assert_eq!(
+            call(api.clone(), "GET", "/api/v1/projects", Some(&token)).await,
+            StatusCode::UNAUTHORIZED,
+            "the allowlist has the last word over an old token"
+        );
+
+        // with no allowlist at all, Clerk decides alone and the token works
+        let (api, token) = locked_api(None);
+        assert_eq!(call(api, "GET", "/api/v1/projects", Some(&token)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn local_mode_stays_exactly_as_it_was() {
+        // no Clerk keys: no gate, no login, nothing to configure
+        let api = api_with_data();
+        assert!(api.auth.is_none());
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", None).await, StatusCode::OK);
+        assert_eq!(call(api.clone(), "POST", "/mcp", None).await, StatusCode::OK);
+        let (_, cfg) = get_on(api, "/api/config").await;
+        assert_eq!(cfg["mode"], "local");
+        assert!(cfg.get("clerk_publishable_key").is_none(), "no key to leak in local mode");
+    }
+
+    /// The other half of the gate: a Clerk session, not a personal token.
+    /// This is what the panel sends on every call once someone signs in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_signed_in_person_gets_in_and_can_authorize_a_machine() {
+        let _lock = crate::testutil::env_lock();
+        let (auth, session) = crate::auth::fake_clerk_session(Some(vec!["murilo@example.com"])).await;
+        let mut api = api_with_data();
+        api.auth = Some(Arc::new(auth));
+
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", Some(&session)).await, StatusCode::OK);
+        assert_eq!(call(api.clone(), "GET", "/api/team", Some(&session)).await, StatusCode::OK);
+
+        // approving a device code takes that session — and binds the token to
+        // the email in it, not to anything the agent sent
+        let (_, start) = post_json(api.clone(), "/api/device/start", serde_json::json!({})).await;
+        let code = start["code"].as_str().unwrap().to_string();
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/device/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {session}"))
+                    .body(Body::from(serde_json::json!({ "code": code }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let (_, poll) = get_on(api.clone(), &format!("/api/device/poll?code={code}")).await;
+        assert_eq!(poll["email"], "Murilo@Example.com", "the approver, from the session");
+
+        // a code that was never opened cannot be approved into existence
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/device/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {session}"))
+                    .body(Body::from(r#"{"code":"ZZZZ-ZZZZ"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+        std::env::remove_var("WEBO_CLERK_API_BASE");
+    }
+
+    #[tokio::test]
+    async fn the_browser_authorization_hands_over_one_token_and_only_one() {
+        let (api, _) = locked_api(Some(vec!["murilo@example.com"]));
+
+        // 1. the agent opens a code
+        let (status, start) = post_json(api.clone(), "/api/device/start", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let code = start["code"].as_str().unwrap().to_string();
+        assert_eq!(code.len(), 9, "{code}");
+        assert_eq!(start["authorize_path"], format!("/authorize?code={code}"));
+
+        // waiting means waiting — nothing is issued yet
+        let (_, poll) = get_on(api.clone(), &format!("/api/device/poll?code={code}")).await;
+        assert_eq!(poll["status"], "pending");
+        assert!(poll.get("token").is_none());
+
+        // 2. approving needs a signed-in person: a personal token must not be
+        // able to mint another one, or one leak becomes permanent
+        let (status, _) = post_json(api.clone(), "/api/device/approve", serde_json::json!({ "code": code })).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // approve it the way the browser does (offline auth cannot verify a
+        // real session, so the store is the honest stand-in for that step)
+        assert!(api
+            .store
+            .device_approve(&code, "murilo@example.com", crate::auth::DEVICE_TTL_SECS)
+            .unwrap());
+
+        // 3. the agent polls and gets the token, bound to the approver
+        let (_, poll) = get_on(api.clone(), &format!("/api/device/poll?code={code}")).await;
+        assert_eq!(poll["status"], "approved");
+        assert_eq!(poll["email"], "murilo@example.com");
+        let token = poll["token"].as_str().unwrap().to_string();
+        assert!(token.starts_with("webo_"));
+        assert_eq!(call(api.clone(), "GET", "/api/v1/projects", Some(&token)).await, StatusCode::OK);
+
+        // polling again gives nothing: the code is spent
+        let (_, again) = get_on(api.clone(), &format!("/api/device/poll?code={code}")).await;
+        assert_eq!(again["status"], "delivered");
+        assert!(again.get("token").is_none(), "a code seen over a shoulder cannot be replayed");
+
+        // an unknown code is not a pending one
+        let (status, _) = get_on(api.clone(), "/api/device/poll?code=ZZZZ-ZZZZ").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // the token shows up for an admin, by hash, never in the clear —
+        // and that listing is itself behind the gate
+        assert_eq!(call(api.clone(), "GET", "/api/tokens", None).await, StatusCode::UNAUTHORIZED);
+        let res = app(api.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tokens")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let tokens = list["tokens"].as_array().unwrap();
+        assert!(tokens.iter().any(|t| t["email"] == "murilo@example.com"));
+        assert!(!list.to_string().contains(&token), "the token itself is never listed");
+    }
+
     async fn get_on(api: Api, path: &str) -> (StatusCode, serde_json::Value) {
         let res = app(api)
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
@@ -2668,6 +2914,47 @@ pub(crate) mod tests {
 }
 
 #[cfg(test)]
+mod front_tests {
+    /// Every call to webo's own API has to carry the credential. It is
+    /// attached in one place — `apiFetch` — so a call site that reaches for
+    /// bare `fetch` silently loses the token and answers 401 with login on.
+    /// That is invisible in local mode, which is where the panel is developed.
+    #[test]
+    fn no_call_to_our_api_goes_around_apifetch() {
+        let html = include_str!("../web/index.html");
+        let mut offenders = Vec::new();
+        for (i, line) in html.lines().enumerate() {
+            for pat in ["fetch(`/api", "fetch(\"/api", "fetch('/api"] {
+                let mut from = 0;
+                while let Some(at) = line[from..].find(pat) {
+                    let at = from + at;
+                    let before = line[..at].chars().last();
+                    // `apiFetch(` ends in "i" before "fetch("; bare fetch does not
+                    if !matches!(before, Some('i')) {
+                        offenders.push(format!("line {}: {}", i + 1, line.trim()));
+                    }
+                    from = at + pat.len();
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "these call the API without the token:\n{}", offenders.join("\n"));
+    }
+
+    /// clerk-js does its own fetching. An earlier version of the login hooked
+    /// window.fetch to attach the token everywhere and broke it: Clerk could
+    /// not read its environment and rendered an email form for an instance
+    /// that only allows Google. The empty sign-in card was the symptom.
+    #[test]
+    fn window_fetch_is_left_alone() {
+        let html = include_str!("../web/index.html");
+        assert!(
+            !html.contains("window.fetch ="),
+            "replacing window.fetch breaks clerk-js — attach the token in apiFetch instead"
+        );
+    }
+}
+
+#[cfg(test)]
 mod i18n_tests {
     /// The front is one file with two dictionaries. A key used but never
     /// declared renders as the raw key on screen — it has shipped twice.
@@ -2724,5 +3011,245 @@ mod i18n_tests {
             .filter(|k| !en.contains(k) || !pt.contains(k))
             .collect();
         assert!(missing.is_empty(), "strings used but not translated: {missing:?}");
+    }
+}
+
+// ---- who is asking ---------------------------------------------------------
+
+/// Paths that answer before anyone has a credential. Everything else — the
+/// whole `/api/v1` surface and `/mcp` — needs one when login is on.
+///
+/// - `/` and the assets are the shell: it has nothing in it until the API
+///   answers, and it is what renders the login screen.
+/// - `/api/config` is how the shell learns whether to show that screen.
+/// - the device endpoints are the authorization flow itself: whoever is
+///   authorizing does not have a token yet, by definition.
+/// - `/api/v1/ingest/{key}` is the browser error snippet, running in a random
+///   visitor's browser on a deployed app. It authenticates with the project's
+///   own ingest key and could never carry a team credential.
+/// - `/healthz` is what says the process is alive, including to things that
+///   have no login at all.
+fn is_public(path: &str) -> bool {
+    matches!(
+        path,
+        "/" | "/authorize" | "/healthz" | "/api/config" | "/api/device/start" | "/api/device/poll"
+    )
+        || path.starts_with("/api/v1/ingest/")
+}
+
+/// The email behind a request, once a credential has been checked. Handlers
+/// that care read it out of the request; `None` means webo is running in local
+/// mode, where there is nobody to name.
+#[derive(Clone, Debug)]
+pub struct Viewer(pub Option<String>);
+
+/// Reads `Authorization: Bearer …` and answers with the email it belongs to.
+/// Two kinds of credential resolve here and the prefix says which: a personal
+/// `webo_…` token, or a Clerk session JWT from the signed-in panel.
+fn credential_email(api: &Api, auth: &crate::auth::Auth, bearer: &str) -> Result<String, String> {
+    if let Some(rest) = bearer.strip_prefix("webo_") {
+        if rest.is_empty() {
+            return Err("empty token".into());
+        }
+        let email = api
+            .store
+            .token_lookup(&crate::auth::hash_token(bearer))
+            .map_err(|e| e.to_string())?
+            .ok_or("this token was revoked, or never existed")?;
+        // The allowlist wins over an old token: someone removed from the team
+        // stops getting in without anyone hunting for their credentials.
+        auth.check_allowed(&email)?;
+        return Ok(email);
+    }
+    auth.session_user(bearer).map(|u| u.email)
+}
+
+/// The gate. With no Clerk keys configured it lets everything through, which
+/// is webo's local mode; with them, every non-public path needs a credential.
+pub(crate) async fn require_auth(
+    AxumState(api): AxumState<Api>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(auth) = api.auth.clone() else {
+        request.extensions_mut().insert(Viewer(None));
+        return next.run(request).await;
+    };
+    let path = request.uri().path().to_string();
+    // A CORS preflight carries no Authorization header by design — refusing it
+    // would break the very ingest call it precedes.
+    if is_public(&path) || request.method() == axum::http::Method::OPTIONS {
+        request.extensions_mut().insert(Viewer(None));
+        return next.run(request).await;
+    }
+    let bearer = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|v| v.trim().to_string());
+    let outcome = match bearer.as_deref() {
+        Some(t) if !t.is_empty() => credential_email(&api, &auth, t),
+        _ => Err("no credential: send Authorization: Bearer <token>".into()),
+    };
+    match outcome {
+        Ok(email) => {
+            request.extensions_mut().insert(Viewer(Some(email)));
+            next.run(request).await
+        }
+        Err(e) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": format!("not authenticated: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// What the shell asks before it renders anything: is there a login here, and
+/// with which Clerk instance? Public on purpose — it is the one thing a
+/// browser needs to know to be able to sign in at all.
+async fn config(AxumState(api): AxumState<Api>) -> impl IntoResponse {
+    match &api.auth {
+        Some(a) => Json(serde_json::json!({
+            "mode": "server",
+            "clerk_publishable_key": a.publishable_key,
+        })),
+        None => Json(serde_json::json!({ "mode": "local" })),
+    }
+}
+
+/// The team, for the panel's header and for showing who holds what.
+async fn team(AxumState(api): AxumState<Api>) -> impl IntoResponse {
+    match &api.auth {
+        None => Json(serde_json::json!({ "users": [] })).into_response(),
+        Some(a) => match a.team() {
+            Ok(users) => Json(serde_json::json!({ "users": users })).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": e }))).into_response(),
+        },
+    }
+}
+
+/// Step 1, run by the agent: open a code. Public — there is nothing to
+/// protect yet, and the code is worth nothing until a person approves it.
+async fn device_start(AxumState(api): AxumState<Api>) -> impl IntoResponse {
+    let code = crate::auth::new_device_code();
+    if let Err(e) = api.store.device_start(&code) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response();
+    }
+    let _ = api.store.device_prune(crate::auth::DEVICE_TTL_SECS * 4);
+    Json(serde_json::json!({
+        "code": code,
+        "authorize_path": format!("/authorize?code={code}"),
+        "expires_in": crate::auth::DEVICE_TTL_SECS,
+        "interval": 3,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeviceCode {
+    code: String,
+}
+
+/// Step 2, run by a person in the browser: approve the code they are looking
+/// at. This one needs a *session*, not a token — a personal token must not be
+/// able to mint another one, or one leak becomes permanent.
+async fn device_approve(
+    AxumState(api): AxumState<Api>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<DeviceCode>,
+) -> impl IntoResponse {
+    let email = match &api.auth {
+        // local mode has no identity to bind; the approval is still explicit
+        None => "local".to_string(),
+        Some(a) => {
+            let bearer = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            match a.session_user(&bearer) {
+                Ok(u) => u.email,
+                Err(e) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": format!("only a signed-in person can authorize: {e}")
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    };
+    match api.store.device_approve(&body.code.to_uppercase(), &email, crate::auth::DEVICE_TTL_SECS) {
+        Ok(true) => Json(serde_json::json!({ "ok": true, "email": email })).into_response(),
+        Ok(false) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "that code is unknown, expired, or already used" })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response(),
+    }
+}
+
+/// Step 3, the agent polling: once approved, this hands over the token — once.
+/// The cleartext is never stored, so a lost token means a new authorization,
+/// not a lookup.
+async fn device_poll(AxumState(api): AxumState<Api>, Query(q): Query<DeviceCode>) -> impl IntoResponse {
+    let code = q.code.to_uppercase();
+    match api.store.device_status(&code, crate::auth::DEVICE_TTL_SECS) {
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response(),
+        Ok(None) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "unknown code" })))
+            .into_response(),
+        Ok(Some((status, email))) => match status.as_str() {
+            "approved" => {
+                let email = email.unwrap_or_else(|| "local".into());
+                let token = crate::auth::new_personal_token();
+                if token.is_empty() {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": "no entropy available to issue a token" })),
+                    )
+                        .into_response();
+                }
+                if let Err(e) = api.store.token_insert(&crate::auth::hash_token(&token), &email, "device-flow") {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+                        .into_response();
+                }
+                let _ = api.store.device_mark_delivered(&code);
+                println!("[webo-auth] token issued to {email} (device flow)");
+                Json(serde_json::json!({ "status": "approved", "token": token, "email": email })).into_response()
+            }
+            other => Json(serde_json::json!({ "status": other })).into_response(),
+        },
+    }
+}
+
+/// Who holds a credential right now. Tokens are named by their hash — the
+/// only handle that exists after issuance — which is also how you revoke one.
+async fn tokens_list(AxumState(api): AxumState<Api>) -> impl IntoResponse {
+    match api.store.token_list() {
+        Ok(tokens) => Json(serde_json::json!({ "tokens": tokens })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response(),
+    }
+}
+
+async fn token_revoke(AxumState(api): AxumState<Api>, AxumPath(hash): AxumPath<String>) -> impl IntoResponse {
+    match api.store.token_revoke(&hash) {
+        Ok(true) => {
+            println!("[webo-auth] token {hash} revoked");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "no such token" })))
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() })))
+            .into_response(),
     }
 }

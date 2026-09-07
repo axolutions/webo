@@ -154,6 +154,40 @@ port gets a 301 and that is expected, not a bug.
   webo itself is deployed. Windows beyond 24h read the 5-minute aggregates
   persisted in SQLite, which do survive.
 
+## Who gets in
+
+The panel and `/mcp` are both behind one gate, and the environment decides
+whether it exists at all:
+
+- **No Clerk keys** — local mode: no login, everything open. That is a fresh
+  clone on someone's laptop, and it is what the tests run against.
+- **`CLERK_PUBLISHABLE_KEY` + `CLERK_SECRET_KEY`** — every path except the
+  shell, `/api/config`, the device endpoints, `/healthz` and the browser
+  ingest needs `Authorization: Bearer …`. One key alone is refused at
+  startup: a half-configured login that silently serves the panel open is
+  the failure this exists to prevent.
+
+Two credentials resolve to one email:
+
+- a **Clerk session JWT**, what the signed-in panel sends, verified locally
+  against the instance's JWKS;
+- a **personal `webo_…` token**, what an agent's MCP client sends, stored
+  only as a sha256 — the cleartext exists once, in the answer that issued it.
+
+`WEBO_ALLOWED_EMAILS` (comma-separated) has the last word over both: removing
+an address stops its tokens working on the next request, with nothing to hunt
+down. A blank value means "no list", never "nobody" — a typo in the compose
+file must not lock the team out.
+
+A machine that cannot open a browser authorizes like a TV: `POST
+/api/device/start` gives a code, a person opens `/authorize?code=…` while
+signed in and clicks once, and the polling agent gets the token exactly once.
+The email on the token comes from that session, never from anything the agent
+sent.
+
+The MCP listener on the tailnet (port 5051) has no login: the tailnet is the
+credential there, and it is the way back in if Clerk is unreachable.
+
 ## What an agent may change through MCP
 
 The MCP server can operate the machine, not just read it. The limits are

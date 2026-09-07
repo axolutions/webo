@@ -4,7 +4,7 @@
 //! `server_id` exists from day one so multi-server can arrive without a
 //! schema migration.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
@@ -51,6 +51,18 @@ pub struct Database {
     /// every deploy wipes it.
     pub persisted: bool,
     pub created_at: i64,
+}
+
+/// A personal token, as an admin sees it: who holds it, since when, and
+/// whether it is still in use. The hash identifies it for revocation; the
+/// token itself was shown once, at issuance, and is not recoverable.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ApiToken {
+    pub hash: String,
+    pub email: String,
+    pub label: String,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -247,6 +259,26 @@ CREATE TABLE IF NOT EXISTS samples (
     PRIMARY KEY (scope, ts)
 );
 CREATE INDEX IF NOT EXISTS idx_samples_scope ON samples (scope, ts DESC);
+
+-- Browser authorization for machines that cannot do a browser login: an agent
+-- starts a code, a person approves it while signed in, and the approver's
+-- email — never anything the agent sent — is what the token carries.
+CREATE TABLE IF NOT EXISTS device_codes (
+    code TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending',
+    email TEXT,
+    created_at INTEGER NOT NULL
+);
+
+-- Only the sha256 is kept: a copy of this database hands nobody a token.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    last_used INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_email ON api_tokens (email);
 ";
 
 /// Additive migrations for databases created by older versions —
@@ -262,6 +294,13 @@ fn migrate(conn: &Connection) {
     let _ = conn.execute("ALTER TABLE issues ADD COLUMN culprit TEXT", []);
     // databases from before the state column carried resolution as a flag
     let _ = conn.execute("UPDATE issues SET state = 'resolved' WHERE resolved = 1 AND state = 'open'", []);
+}
+
+fn now_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl Store {
@@ -567,6 +606,124 @@ impl Store {
             params![project_id],
         )?;
         Ok(removed)
+    }
+
+    // ---- browser authorization and personal tokens ------------------------
+
+    /// Opens a device code. Nothing about the caller is recorded: what makes
+    /// the code worth anything is the person who approves it later.
+    pub fn device_start(&self, code: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO device_codes (code, status, email, created_at)
+             VALUES (?1, 'pending', NULL, ?2)",
+            params![code, now_ts()],
+        )?;
+        Ok(())
+    }
+
+    /// A signed-in person approves a code, binding their email to it. Only a
+    /// pending, unexpired code can be approved — approving twice, or approving
+    /// something already delivered, does nothing and says so.
+    pub fn device_approve(&self, code: &str, email: &str, ttl: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE device_codes SET status = 'approved', email = ?2
+             WHERE code = ?1 AND status = 'pending' AND created_at > ?3",
+            params![code, email, now_ts() - ttl],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// What the waiting agent sees: pending, approved (with the email),
+    /// delivered, or expired. An unknown code is None — it is not the same
+    /// thing as expired and the caller should not conflate them.
+    pub fn device_status(&self, code: &str, ttl: i64) -> rusqlite::Result<Option<(String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, Option<String>, i64)> = conn
+            .query_row(
+                "SELECT status, email, created_at FROM device_codes WHERE code = ?1",
+                params![code],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(status, email, created)| {
+            if status == "pending" && created <= now_ts() - ttl {
+                ("expired".to_string(), None)
+            } else {
+                (status, email)
+            }
+        }))
+    }
+
+    /// The token is handed over exactly once: after this the code is spent,
+    /// so a code seen over someone's shoulder cannot be replayed for a second
+    /// credential.
+    pub fn device_mark_delivered(&self, code: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE device_codes SET status = 'delivered' WHERE code = ?1", params![code])?;
+        Ok(())
+    }
+
+    /// Drops codes past their life. Nothing depends on this running — an
+    /// expired code is already refused — it just keeps the table small.
+    pub fn device_prune(&self, ttl: i64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM device_codes WHERE created_at <= ?1", params![now_ts() - ttl])
+    }
+
+    pub fn token_insert(&self, hash: &str, email: &str, label: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO api_tokens (hash, email, label, created_at, last_used)
+             VALUES (?1, ?2, ?3, ?4, NULL)",
+            params![hash, email, label, now_ts()],
+        )?;
+        Ok(())
+    }
+
+    /// Resolves a token hash to the email it belongs to, recording the use.
+    /// `last_used` is what tells a revoked-looking token from a forgotten one.
+    pub fn token_lookup(&self, hash: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let email: Option<String> = conn
+            .query_row("SELECT email FROM api_tokens WHERE hash = ?1", params![hash], |r| r.get(0))
+            .optional()?;
+        if email.is_some() {
+            conn.execute("UPDATE api_tokens SET last_used = ?2 WHERE hash = ?1", params![hash, now_ts()])?;
+        }
+        Ok(email)
+    }
+
+    /// Every token, newest first — hashes are never returned, only who holds
+    /// one and since when.
+    pub fn token_list(&self) -> rusqlite::Result<Vec<ApiToken>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT hash, email, label, created_at, last_used FROM api_tokens ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ApiToken {
+                hash: r.get(0)?,
+                email: r.get(1)?,
+                label: r.get(2)?,
+                created_at: r.get(3)?,
+                last_used: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn token_revoke(&self, hash: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM api_tokens WHERE hash = ?1", params![hash])? > 0)
+    }
+
+    /// Revokes everything one person holds — what you reach for when someone
+    /// leaves, without hunting for their individual tokens.
+    pub fn token_revoke_email(&self, email: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM api_tokens WHERE email = ?1", params![email])
     }
 
     pub fn delete_logs(&self, project_id: i64) -> rusqlite::Result<()> {
@@ -1130,6 +1287,60 @@ mod tests {
         assert_eq!(s.project_by_ingest_key("chave-errada").unwrap(), None);
         // stored as bookkeeping, and filtered out of the app's env file and UI
         assert!(s.env_vars(id).unwrap().iter().any(|v| v.key.starts_with("__WEBO_")));
+    }
+
+    #[test]
+    fn a_device_code_becomes_a_token_exactly_once() {
+        let s = store();
+        let ttl = 900;
+        s.device_start("ABCD-2345").unwrap();
+        assert_eq!(s.device_status("ABCD-2345", ttl).unwrap().unwrap().0, "pending");
+
+        // approving binds the approver's email to the code
+        assert!(s.device_approve("ABCD-2345", "murilo@example.com", ttl).unwrap());
+        let (status, email) = s.device_status("ABCD-2345", ttl).unwrap().unwrap();
+        assert_eq!((status.as_str(), email.as_deref()), ("approved", Some("murilo@example.com")));
+
+        // approving again does nothing: the second approver cannot take it over
+        assert!(!s.device_approve("ABCD-2345", "someone@else.com", ttl).unwrap());
+        assert_eq!(s.device_status("ABCD-2345", ttl).unwrap().unwrap().1.unwrap(), "murilo@example.com");
+
+        // delivered is a one-way door — a code read over a shoulder is spent
+        s.device_mark_delivered("ABCD-2345").unwrap();
+        assert_eq!(s.device_status("ABCD-2345", ttl).unwrap().unwrap().0, "delivered");
+        assert!(!s.device_approve("ABCD-2345", "murilo@example.com", ttl).unwrap());
+
+        // an unknown code is not an expired one
+        assert!(s.device_status("NOPE-NOPE", ttl).unwrap().is_none());
+
+        // a code past its life reads as expired and cannot be approved
+        s.device_start("OLD1-2345").unwrap();
+        assert_eq!(s.device_status("OLD1-2345", 0).unwrap().unwrap().0, "expired");
+        assert!(!s.device_approve("OLD1-2345", "murilo@example.com", 0).unwrap());
+        assert_eq!(s.device_prune(0).unwrap(), 2, "pruning clears what is past its life");
+    }
+
+    #[test]
+    fn tokens_resolve_to_a_person_and_can_be_taken_away() {
+        let s = store();
+        let (a, b) = ("hash-a", "hash-b");
+        s.token_insert(a, "murilo@example.com", "device-flow").unwrap();
+        s.token_insert(b, "gustavo@example.com", "ci").unwrap();
+
+        assert_eq!(s.token_lookup(a).unwrap().unwrap(), "murilo@example.com");
+        assert!(s.token_lookup("hash-of-nothing").unwrap().is_none());
+        // using a token records that it is alive
+        assert!(s.token_list().unwrap().iter().find(|t| t.hash == a).unwrap().last_used.is_some());
+        assert!(s.token_list().unwrap().iter().find(|t| t.hash == b).unwrap().last_used.is_none());
+
+        assert!(s.token_revoke(a).unwrap());
+        assert!(s.token_lookup(a).unwrap().is_none(), "a revoked token stops working immediately");
+        assert!(!s.token_revoke(a).unwrap(), "revoking twice is not an error, just nothing");
+
+        // when someone leaves, everything they hold goes at once
+        s.token_insert("hash-c", "gustavo@example.com", "laptop").unwrap();
+        assert_eq!(s.token_revoke_email("gustavo@example.com").unwrap(), 2);
+        assert!(s.token_list().unwrap().is_empty());
     }
 
     #[test]

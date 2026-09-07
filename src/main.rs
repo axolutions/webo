@@ -25,7 +25,22 @@ async fn main() {
     // hourly check, daily dump per postgres database, 7 kept
     tokio::spawn(webo::backups::run(store.clone(), 3600));
 
-    let api = server::Api { state, store };
+    // Login is on when the Clerk keys are there. Half a configuration is a
+    // mistake, not a mode: refusing to start beats serving the panel open
+    // while looking configured.
+    let auth = match webo::auth::Auth::from_env() {
+        Ok(a) => a.map(Arc::new),
+        Err(e) => {
+            eprintln!("webo: {e}");
+            std::process::exit(1);
+        }
+    };
+    match &auth {
+        Some(_) => println!("webo auth: Clerk (the panel and /mcp need a credential)"),
+        None => println!("webo auth: none — local mode, everything is open"),
+    }
+
+    let api = server::Api { state, store, auth };
 
     // MCP: operational surface, so it binds ONLY to the Tailscale address.
     // Without one it does not start — publishing these tools to the network

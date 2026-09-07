@@ -473,6 +473,26 @@ impl Store {
         )
     }
 
+    /// Turns what a person typed into an FTS5 query that means what they typed.
+    ///
+    /// FTS5 reads `-`, `:`, `*`, `(` and `"` as operators, so a raw log term
+    /// like `webo-mcp` or `Completed 500:` is either a syntax error or a NOT —
+    /// and the error surfaces as "no lines matched", which is a wrong answer,
+    /// not an empty one. Every token is quoted, which makes it a literal
+    /// phrase: `webo-mcp` becomes `"webo-mcp"` and matches the line it is on.
+    pub fn fts_query(raw: &str) -> Option<String> {
+        let quoted: Vec<String> = raw
+            .split_whitespace()
+            .map(|tok| format!("\"{}\"", tok.replace('\"', "\"\"")))
+            // a token of nothing but quotes quotes away to nothing
+            .filter(|q| q.len() > 2)
+            .collect();
+        if quoted.is_empty() {
+            return None;
+        }
+        Some(quoted.join(" "))
+    }
+
     /// Search: free text (FTS5 when a query is given), optional container and
     /// time window, newest first.
     pub fn search_logs(
@@ -484,6 +504,7 @@ impl Store {
         limit: usize,
     ) -> rusqlite::Result<Vec<LogLine>> {
         let conn = self.conn.lock().unwrap();
+        let query = query.and_then(Self::fts_query);
         let mut sql = String::from(
             "SELECT CAST(ts AS INTEGER) AS t, container, stream, line FROM logs WHERE project_id = ?1",
         );
@@ -513,7 +534,7 @@ impl Store {
         let map = |r: &rusqlite::Row| {
             Ok(LogLine { ts: r.get(0)?, container: r.get(1)?, stream: r.get(2)?, line: r.get(3)? })
         };
-        match query {
+        match query.as_deref() {
             Some(q) => push(stmt.query_map(params![project_id, q], map)?)?,
             None => push(stmt.query_map(params![project_id], map)?)?,
         }
@@ -1127,12 +1148,34 @@ mod tests {
             line(200, "app", "GET /health 200"),
             line(300, "db", "database system is ready"),
             line(400, "app", "ERROR connection refused"),
+            line(500, "app", "[webo-mcp] delete_project {\"slug\":\"codo\"} -> REFUSED"),
         ]).unwrap();
+
+        // a term with a hyphen is what people actually type, and FTS5 reads the
+        // hyphen as an operator: unescaped, this search answered "nothing
+        // matched" while the line was sitting right there
+        let hits = s.search_logs(id, Some("webo-mcp"), None, None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "a hyphenated term finds its line");
+        assert!(hits[0].line.contains("delete_project"));
+        // the characters that make FTS5 throw instead of answer
+        for hostile in ["Completed 500:", "GET /health\"", "conn*", "(refused)", "-refused"] {
+            let out = s.search_logs(id, Some(hostile), None, None, 10);
+            assert!(out.is_ok(), "'{hostile}' must not blow up the search");
+        }
+        // and it is still a search, not a pass-through
+        assert_eq!(s.search_logs(id, Some("refused"), None, None, 10).unwrap().len(), 2);
+        assert!(s.search_logs(id, Some("nothingmatchesthis"), None, None, 10).unwrap().is_empty());
+        // a query of only punctuation is not a filter at all
+        assert_eq!(
+            s.search_logs(id, Some("  "), None, None, 10).unwrap().len(),
+            5,
+            "blank query means no filter, not zero results"
+        );
 
         // newest first
         let all = s.search_logs(id, None, None, None, 10).unwrap();
-        assert_eq!(all.len(), 4);
-        assert_eq!(all[0].ts, 400);
+        assert_eq!(all.len(), 5);
+        assert_eq!(all[0].ts, 500);
 
         // full text
         let hits = s.search_logs(id, Some("connection"), None, None, 10).unwrap();
@@ -1143,10 +1186,10 @@ mod tests {
         let only_db = s.search_logs(id, None, Some("db"), None, 10).unwrap();
         assert_eq!(only_db.len(), 1);
         let recent = s.search_logs(id, None, None, Some(250), 10).unwrap();
-        assert_eq!(recent.len(), 2, "only lines at or after the window");
+        assert_eq!(recent.len(), 3, "only lines at or after the window");
 
         // collection resumes from the newest stored line
-        assert_eq!(s.last_log_ts(id, "app").unwrap(), Some(400));
+        assert_eq!(s.last_log_ts(id, "app").unwrap(), Some(500));
         assert_eq!(s.last_log_ts(id, "nope").unwrap(), None);
 
         // pruning drops the oldest and keeps the newest

@@ -10,6 +10,17 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # Inside the container there is no Tailscale interface, so the listener
+      # binds to the container's own network; Docker is what restricts who can
+      # reach it — see the port mapping below.
+      - WEBO_MCP_BIND=0.0.0.0:5051
+    ports:
+      # The MCP server can operate the machine, so it is published ONLY on the
+      # host's Tailscale address. Set WEBO_TAILSCALE_IP in .env (`tailscale ip
+      # -4`); without it the default keeps the port on loopback, reachable
+      # from the server itself and nowhere else.
+      - "${WEBO_TAILSCALE_IP:-127.0.0.1}:5051:5051"
     networks:
       - homelab
 

@@ -74,8 +74,10 @@ webo watches one self-hosted server and the projects running on it. Every tool \
 here is read-only. Start with server_health for the machine, or list_projects \
 to see what is deployed; then project_status for one project. When something \
 is wrong, list_errors gives grouped issues and error_detail gives the stack \
-trace; search_logs finds the lines around it. Read webo://runbook before \
-suggesting any change to the server.";
+trace; search_logs finds the lines around it. db_info shows a project's schema \
+before db_rows or db_query read from it. Tools that change something say so in \
+their annotations and need an explicit argument — nothing here writes by \
+accident. Read webo://runbook before suggesting any change to the server.";
 
 /// A tool's answer: text the model reads.
 fn text(body: impl Into<String>) -> Value {
@@ -129,6 +131,23 @@ fn tool(name: &str, description: &str, input: Value) -> Value {
         "inputSchema": input,
         // every phase-1 tool is a pure read: the client can call it without asking
         "annotations": { "readOnlyHint": true, "idempotentHint": true, "openWorldHint": false },
+    })
+}
+
+/// A tool that changes something. The annotations are honest so a client can
+/// ask the user before calling it — `destructive` marks the ones that can lose
+/// data even when the arguments are right.
+fn write_tool(name: &str, description: &str, input: Value, destructive: bool) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input,
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": destructive,
+            "idempotentHint": false,
+            "openWorldHint": false,
+        },
     })
 }
 
@@ -226,6 +245,75 @@ fn tool_catalog() -> Vec<Value> {
             ),
         ),
         tool(
+            "db_info",
+            "What database a project has (its own Postgres container, or a SQLite file found in a \
+             volume) and every table with an estimated row count. The map to read before querying.",
+            schema(json!({ "slug": { "type": "string", "description": SLUG_DESC } }), vec!["slug"]),
+        ),
+        tool(
+            "db_rows",
+            "Browse one table with paging and ordering, without writing SQL. Cheaper and safer than \
+             db_query for the common case of looking at the data.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "table": { "type": "string", "description": "Table name, as listed by db_info." },
+                    "limit": { "type": "integer", "description": "Rows per page (default 20, max 100)." },
+                    "offset": { "type": "integer", "description": "Rows to skip." },
+                    "order_by": { "type": "string", "description": "Column to sort by." },
+                    "descending": { "type": "boolean", "description": "Sort descending instead of ascending." }
+                }),
+                vec!["slug", "table"],
+            ),
+        ),
+        write_tool(
+            "db_query",
+            "Run SQL. READ-ONLY unless write:true — the Postgres session itself is opened read-only, \
+             so a stray UPDATE is refused by the database, not by a check here. Setting write:true \
+             takes a backup first and names the file in the answer, so the change is reversible.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "sql": { "type": "string", "description": "The statement to run." },
+                    "write": { "type": "boolean", "description": "Allow statements that change data. A backup is taken first." }
+                }),
+                vec!["slug", "sql"],
+            ),
+            false,
+        ),
+        write_tool(
+            "db_backup",
+            "List a project's database dumps, take one now, or restore one. Restoring overwrites the \
+             current data and needs confirm:true. Downloading is not offered — the answer gives the \
+             file name and size instead.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "action": { "type": "string", "enum": ["list", "create", "restore"], "description": "Defaults to list." },
+                    "file": { "type": "string", "description": "Which dump to restore, from the list." },
+                    "confirm": { "type": "boolean", "description": "Required to restore: it overwrites current data." }
+                }),
+                vec!["slug"],
+            ),
+            true,
+        ),
+        write_tool(
+            "triage_errors",
+            "Resolve, ignore, reopen or delete issues, one or many at once. Ignoring silences an \
+             issue even when it happens again; resolving lets it reopen. Deleting drops the \
+             occurrences too and needs confirm:true.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "issue_ids": { "type": "array", "items": { "type": "integer" }, "description": "Ids from list_errors." },
+                    "action": { "type": "string", "enum": ["resolve", "ignore", "reopen", "delete"], "description": "What to do with them." },
+                    "confirm": { "type": "boolean", "description": "Required to delete." }
+                }),
+                vec!["slug", "issue_ids", "action"],
+            ),
+            true,
+        ),
+        tool(
             "error_detail",
             "The occurrences of one issue with the full stack trace and where it came from. This \
              is what makes a fix suggestable.",
@@ -280,6 +368,11 @@ async fn call_tool(api: &Api, params: &Value) -> Result<Value, String> {
         "tail_logs" => run(api, params, tail_logs).await,
         "list_errors" => run(api, params, list_errors).await,
         "error_detail" => run(api, params, error_detail).await,
+        "db_info" => run(api, params, db_info).await,
+        "db_rows" => run(api, params, db_rows).await,
+        "db_query" => run(api, params, db_query).await,
+        "db_backup" => run(api, params, db_backup).await,
+        "triage_errors" => run(api, params, triage_errors).await,
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -944,6 +1037,292 @@ async fn error_detail(api: Api, p: crate::store::Project, params: Value) -> Stri
     )
 }
 
+// ---------------------------------------------------------------- database
+
+async fn db_info(api: Api, p: crate::store::Project, _params: Value) -> String {
+    let Some(db) = api.store.database(p.id).ok().flatten() else {
+        return format!("{} has no database yet.", p.slug);
+    };
+    let head = if db.kind == "postgres" {
+        format!(
+            "{} · postgres in its own container ({}), database {}",
+            p.slug,
+            db.container.clone().unwrap_or_default(),
+            db.db_name.clone().unwrap_or_default()
+        )
+    } else {
+        format!(
+            "{} · sqlite at {} in volume {}{}",
+            p.slug,
+            db.file_path.clone().unwrap_or_default(),
+            db.volume.clone().unwrap_or_default(),
+            if db.persisted { "" } else { "\nWARNING: this file sits in the container layer — every deploy wipes it" }
+        )
+    };
+    let (_, tables) = match crate::server::table_names(&api, &p.slug).await {
+        Ok(t) => t,
+        Err((_, msg)) => return format!("{head}\n\nCould not read the schema: {msg}"),
+    };
+    if tables.is_empty() {
+        return format!("{head}\n\nNo tables yet.");
+    }
+    // one pass for estimated counts; exact counts would scan every table
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    if db.kind == "postgres" {
+        if let Ok(out) = crate::server::run_sql(
+            &api, &p.slug, "SELECT relname, n_live_tup FROM pg_stat_user_tables", false,
+        ).await {
+            for row in crate::db::parse_table_output(&out, 500).rows {
+                if let (Some(name), Some(n)) = (row.first(), row.get(1)) {
+                    counts.insert(name.clone(), n.parse().unwrap_or(0));
+                }
+            }
+        }
+    }
+    let rows: Vec<String> = tables
+        .iter()
+        .map(|t| match counts.get(t) {
+            Some(n) => format!("  {t:<28} ~{n} rows"),
+            None => format!("  {t}"),
+        })
+        .collect();
+    format!(
+        "{head}\n\n{n} tables{est}:\n{rows}\n\nUse db_rows to look at one, or db_query for anything else.",
+        n = tables.len(),
+        est = if counts.is_empty() { "" } else { " (counts are estimates)" },
+        rows = rows.join("\n"),
+    )
+}
+
+async fn db_rows(api: Api, p: crate::store::Project, params: Value) -> String {
+    let Some(table) = arg_str(&params, "table") else {
+        return "db_rows needs a table — db_info lists them.".into();
+    };
+    let limit = arg_usize(&params, "limit", 20, 100);
+    let offset = params.get("arguments").and_then(|a| a.get("offset")).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let (_, tables) = match crate::server::table_names(&api, &p.slug).await {
+        Ok(t) => t,
+        Err((_, msg)) => return msg,
+    };
+    // the name reaches SQL only after it matched a real table
+    if !tables.contains(&table) {
+        return format!("{} has no table '{table}'. Tables: {}", p.slug, tables.join(", "));
+    }
+    let order = match arg_str(&params, "order_by") {
+        Some(col) if crate::server::ident_ok(&col) => {
+            let desc = params.get("arguments").and_then(|a| a.get("descending")).and_then(|v| v.as_bool()).unwrap_or(false);
+            format!(" ORDER BY \"{col}\" {}", if desc { "DESC" } else { "ASC" })
+        }
+        Some(bad) => return format!("'{bad}' is not a valid column name."),
+        None => String::new(),
+    };
+    let sql = format!("SELECT * FROM \"{table}\"{order} LIMIT {limit} OFFSET {offset}");
+    let out = match crate::server::run_sql(&api, &p.slug, &sql, false).await {
+        Ok(o) => o,
+        Err((_, msg)) => return format!("Query failed: {msg}"),
+    };
+    let parsed = crate::db::parse_table_output(&out, limit);
+    if parsed.rows.is_empty() {
+        return format!("{table} has no rows at offset {offset}.");
+    }
+    let total = crate::server::run_sql(&api, &p.slug, &format!("SELECT COUNT(*) FROM \"{table}\""), false)
+        .await
+        .ok()
+        .and_then(|o| crate::db::parse_table_output(&o, 2).rows.first().and_then(|r| r.first()).and_then(|v| v.parse::<i64>().ok()))
+        .unwrap_or(-1);
+
+    // align the columns so the model can read the table as a table
+    let widths: Vec<usize> = parsed.columns.iter().enumerate().map(|(i, c)| {
+        parsed.rows.iter().filter_map(|r| r.get(i).map(|v| v.chars().count()))
+            .chain(std::iter::once(c.chars().count())).max().unwrap_or(8).min(38)
+    }).collect();
+    let cell = |v: &str, w: usize| { let t: String = v.chars().take(w).collect(); format!("{t:<w$}", w = w) };
+    let header = parsed.columns.iter().enumerate().map(|(i, c)| cell(c, widths[i])).collect::<Vec<_>>().join("  ");
+    let body: Vec<String> = parsed.rows.iter().map(|r| {
+        r.iter().enumerate().map(|(i, v)| cell(v, *widths.get(i).unwrap_or(&20))).collect::<Vec<_>>().join("  ")
+    }).collect();
+    format!(
+        "{table} · rows {from}–{to}{of}{order_note}\n\n{header}\n{rule}\n{body}",
+        from = offset + 1,
+        to = offset + parsed.rows.len() as u64,
+        of = if total >= 0 { format!(" of {total}") } else { String::new() },
+        order_note = arg_str(&params, "order_by").map(|c| format!(" · ordered by {c}")).unwrap_or_default(),
+        header = header,
+        rule = "-".repeat(header.chars().count().min(120)),
+        body = body.join("\n"),
+    )
+}
+
+async fn db_query(api: Api, p: crate::store::Project, params: Value) -> String {
+    let Some(sql) = arg_str(&params, "sql") else { return "db_query needs sql.".into() };
+    let write = params.get("arguments").and_then(|a| a.get("write")).and_then(|v| v.as_bool()).unwrap_or(false);
+    let changes = crate::db::is_write_statement(&sql);
+    if changes && !write {
+        return format!(
+            "This statement changes data, and write was not set:\n  {}\n\nCall again with \
+             write:true if that is what you mean. A backup is taken first.",
+            sql.lines().next().unwrap_or("").chars().take(120).collect::<String>()
+        );
+    }
+
+    // a write is only reversible if a dump exists from before it
+    let mut prelude = String::new();
+    if changes {
+        match api.store.database(p.id).ok().flatten() {
+            Some(d) if d.kind == "postgres" => {
+                match crate::backups::dump(&d, &crate::server::app_network(), &p.slug).await {
+                    Ok(file) => prelude = format!("Backed up to {file} before running this.\n\n"),
+                    Err(e) => return format!(
+                        "Refusing to write: the backup failed, so the change would not be reversible.\n{e}"
+                    ),
+                }
+            }
+            Some(_) => {
+                prelude = "NOTE: this is SQLite and webo does not back those up — this change \
+                           cannot be rolled back.\n\n".into()
+            }
+            None => return format!("{} has no database.", p.slug),
+        }
+    }
+
+    let out = match crate::server::run_sql(&api, &p.slug, &sql, write).await {
+        Ok(o) => o,
+        Err((_, msg)) => return format!("{prelude}Query failed: {msg}"),
+    };
+    if out.to_lowercase().contains("error") {
+        return format!("{prelude}The database refused it:\n{}", fmt::cap(out.trim(), 1200));
+    }
+    let parsed = crate::db::parse_table_output(&out, 60);
+    if parsed.columns.is_empty() {
+        return format!("{prelude}Done. The database returned no rows.\n{}", fmt::cap(out.trim(), 400));
+    }
+    let header = parsed.columns.join(" | ");
+    let body: Vec<String> = parsed.rows.iter().map(|r| r.join(" | ")).collect();
+    format!(
+        "{prelude}{n} rows{trunc}\n\n{header}\n{rule}\n{body}",
+        n = parsed.row_count,
+        trunc = if parsed.truncated { " (showing the first ones)" } else { "" },
+        header = header,
+        rule = "-".repeat(header.chars().count().min(120)),
+        body = body.join("\n"),
+    )
+}
+
+async fn db_backup(api: Api, p: crate::store::Project, params: Value) -> String {
+    let action = arg_str(&params, "action").unwrap_or_else(|| "list".into());
+    let Some(db) = api.store.database(p.id).ok().flatten() else {
+        return format!("{} has no database.", p.slug);
+    };
+    if db.kind != "postgres" {
+        return format!(
+            "{} uses SQLite, and webo only backs up Postgres. The file lives in a volume; copying \
+             it is a server-side job.",
+            p.slug
+        );
+    }
+    let root = std::path::PathBuf::from(crate::backups::backups_root());
+    let n = now();
+    match action.as_str() {
+        "create" => match crate::backups::dump(&db, &crate::server::app_network(), &p.slug).await {
+            Ok(file) => {
+                crate::backups::prune(&root, &p.slug, crate::backups::KEEP_PER_PROJECT);
+                let size = crate::backups::list(&root, &p.slug).into_iter()
+                    .find(|b| b.file == file).map(|b| fmt::bytes(b.size_bytes))
+                    .unwrap_or_else(|| "unknown size".into());
+                format!("Backed up {} to {file} ({size}).", p.slug)
+            }
+            Err(e) => format!("Backup failed: {e}"),
+        },
+        "restore" => {
+            let Some(file) = arg_str(&params, "file") else {
+                return "restore needs the file name — call with action:list to see them.".into();
+            };
+            let confirmed = params.get("arguments").and_then(|a| a.get("confirm")).and_then(|v| v.as_bool()).unwrap_or(false);
+            if !confirmed {
+                return format!(
+                    "Restoring {file} would overwrite everything in {}'s database with the contents \
+                     of that dump. Call again with confirm:true if that is what you want.",
+                    p.slug
+                );
+            }
+            match crate::backups::restore(&db, &crate::server::app_network(), &p.slug, &file).await {
+                Ok(()) => format!("Restored {} from {file}.", p.slug),
+                Err(e) => format!("Restore failed: {e}"),
+            }
+        }
+        _ => {
+            let files = crate::backups::list(&root, &p.slug);
+            if files.is_empty() {
+                return format!(
+                    "{} has no backups yet. One is taken daily; call with action:create to make one now.",
+                    p.slug
+                );
+            }
+            let rows: Vec<String> = files.iter()
+                .map(|b| format!("  {}  {:>9}  {}", b.file, fmt::bytes(b.size_bytes), fmt::ago(b.created_at, n)))
+                .collect();
+            format!(
+                "{slug} · {n} backups (daily, {keep} kept)\n\n{rows}\n\nRestore with action:restore, \
+                 file:<name> and confirm:true.",
+                slug = p.slug, n = files.len(), keep = crate::backups::KEEP_PER_PROJECT,
+                rows = rows.join("\n"),
+            )
+        }
+    }
+}
+
+async fn triage_errors(api: Api, p: crate::store::Project, params: Value) -> String {
+    let ids: Vec<i64> = params.get("arguments").and_then(|a| a.get("issue_ids")).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_i64()).collect()).unwrap_or_default();
+    if ids.is_empty() {
+        return "triage_errors needs issue_ids — list_errors shows them.".into();
+    }
+    let Some(action) = arg_str(&params, "action") else {
+        return "triage_errors needs an action: resolve, ignore, reopen or delete.".into();
+    };
+    let known = api.store.issues(p.id, None).unwrap_or_default();
+    let unknown: Vec<String> = ids.iter().filter(|id| !known.iter().any(|i| i.id == **id))
+        .map(|id| id.to_string()).collect();
+    if !unknown.is_empty() {
+        return format!(
+            "{} has no issue(s) #{}. Existing ids: {}",
+            p.slug, unknown.join(", #"),
+            known.iter().map(|i| i.id.to_string()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let changed = match action.as_str() {
+        "delete" => {
+            let confirmed = params.get("arguments").and_then(|a| a.get("confirm")).and_then(|v| v.as_bool()).unwrap_or(false);
+            if !confirmed {
+                return format!(
+                    "Deleting {} issue(s) also drops their occurrences and stack traces. Call again \
+                     with confirm:true. (Resolving instead keeps the history and lets the issue \
+                     reopen if it happens again.)",
+                    ids.len()
+                );
+            }
+            api.store.delete_issues(p.id, &ids).unwrap_or(0)
+        }
+        "resolve" => api.store.set_issue_state(p.id, &ids, "resolved").unwrap_or(0),
+        "ignore" => api.store.set_issue_state(p.id, &ids, "ignored").unwrap_or(0),
+        "reopen" => api.store.set_issue_state(p.id, &ids, "open").unwrap_or(0),
+        other => return format!("'{other}' is not an action. Use resolve, ignore, reopen or delete."),
+    };
+    let (open, resolved, ignored) = api.store.issue_counts(p.id).unwrap_or((0, 0, 0));
+    let note = match action.as_str() {
+        "ignore" => " Ignored issues stay ignored even when the error happens again.",
+        "resolve" => " A resolved issue reopens by itself if the error comes back.",
+        _ => "",
+    };
+    format!(
+        "{action}d {changed} issue(s) on {slug}.{note}\nNow: {open} open, {resolved} resolved, {ignored} ignored.",
+        action = action.trim_end_matches('e'), changed = changed, slug = p.slug, note = note,
+        open = open, resolved = resolved, ignored = ignored,
+    )
+}
+
 // ---------------------------------------------------------------- resources
 
 /// The knowledge that until now only lived in session memory.
@@ -1042,20 +1421,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_catalog_is_nine_read_only_tools_with_usable_schemas() {
+    async fn the_reading_tools_stay_read_only_with_usable_schemas() {
         let out = rpc_call(crate::server::tests::api_with_data(), "tools/list", json!({})).await;
         let tools = out["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9, "phase 1 is nine tools");
-        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        for expected in [
+        const READERS: [&str; 11] = [
             "server_health", "server_processes", "list_projects", "project_status",
             "project_metrics", "search_logs", "tail_logs", "list_errors", "error_detail",
-        ] {
+            "db_info", "db_rows",
+        ];
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for expected in READERS {
             assert!(names.contains(&expected), "missing {expected}");
         }
         for t in tools {
             let name = t["name"].as_str().unwrap();
-            assert_eq!(t["annotations"]["readOnlyHint"], true, "{name} must be read-only in phase 1");
+            if READERS.contains(&name) {
+                assert_eq!(t["annotations"]["readOnlyHint"], true, "{name} must stay read-only");
+            }
             let desc = t["description"].as_str().unwrap();
             assert!(desc.len() > 60, "{name} needs a description an agent can choose by");
             assert_eq!(t["inputSchema"]["type"], "object", "{name}");
@@ -1312,6 +1694,108 @@ mod tests {
         assert!(at("search_logs") < at("project_metrics"), "logs before metrics");
         assert!(body.contains("webo://runbook"), "it points at the runbook: {body}");
         assert!(body.contains("say what is missing"), "it forbids guessing: {body}");
+    }
+
+    #[tokio::test]
+    async fn phase_two_tools_declare_that_they_write() {
+        let out = rpc_call(crate::server::tests::api_with_data(), "tools/list", json!({})).await;
+        let tools = out["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14, "eleven readers plus three writers");
+        let by_name = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
+
+        // the writers are honest, and the two that can lose data say so
+        for n in ["db_query", "db_backup", "triage_errors"] {
+            assert_eq!(by_name(n)["annotations"]["readOnlyHint"], false, "{n}");
+        }
+        assert_eq!(by_name("db_backup")["annotations"]["destructiveHint"], true, "restore overwrites");
+        assert_eq!(by_name("triage_errors")["annotations"]["destructiveHint"], true, "delete drops history");
+        assert_eq!(
+            by_name("db_query")["annotations"]["destructiveHint"], false,
+            "db_query reads by default; the backup is what makes a write reversible"
+        );
+        // and the descriptions name the guard, so the agent knows how to proceed
+        assert!(by_name("db_query")["description"].as_str().unwrap().contains("write:true"));
+        assert!(by_name("db_backup")["description"].as_str().unwrap().contains("confirm:true"));
+        assert!(by_name("triage_errors")["description"].as_str().unwrap().contains("confirm:true"));
+    }
+
+    #[tokio::test]
+    async fn a_write_without_the_flag_is_refused_and_explains_itself() {
+        let api = crate::server::tests::api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        api.store.set_database(id, &crate::store::Database {
+            kind: "postgres".into(), container: Some("codo-db".into()), db_name: Some("codo".into()),
+            username: Some("codo".into()), password: Some("x".into()), volume: None,
+            file_path: None, persisted: true, created_at: 1,
+        }).unwrap();
+
+        let text = tool_text(api, "db_query",
+            json!({ "slug": "codo", "sql": "DELETE FROM notes WHERE id = 1" })).await;
+        assert!(text.contains("changes data"), "{text}");
+        assert!(text.contains("write:true"), "it says how to proceed: {text}");
+        assert!(text.contains("backup is taken first"), "and what protects it: {text}");
+        assert!(!text.contains(" rows"), "nothing ran: {text}");
+    }
+
+    #[tokio::test]
+    async fn destructive_triage_needs_confirmation_and_says_what_is_lost() {
+        let api = crate::server::tests::api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        let i1 = api.store.record_error(id, "f1", "boom", "server", "codo", "boom", 10, None).unwrap();
+
+        // delete without confirm: refused, and it offers the reversible option
+        let refused = tool_text(api.clone(), "triage_errors",
+            json!({ "slug": "codo", "issue_ids": [i1], "action": "delete" })).await;
+        assert!(refused.contains("confirm:true"), "{refused}");
+        assert!(refused.contains("Resolving instead"), "it names the safer option: {refused}");
+        assert_eq!(api.store.issues(id, None).unwrap().len(), 1, "nothing was deleted");
+
+        // resolve needs no confirmation and reports the new counts
+        let resolved = tool_text(api.clone(), "triage_errors",
+            json!({ "slug": "codo", "issue_ids": [i1], "action": "resolve" })).await;
+        assert!(resolved.contains("1 issue(s)"), "{resolved}");
+        assert!(resolved.contains("0 open, 1 resolved"), "{resolved}");
+        assert!(resolved.contains("reopens by itself"), "it explains what resolve means: {resolved}");
+
+        // ignoring warns that it silences future occurrences
+        let ignored = tool_text(api.clone(), "triage_errors",
+            json!({ "slug": "codo", "issue_ids": [i1], "action": "ignore" })).await;
+        assert!(ignored.contains("stay ignored even when the error happens again"), "{ignored}");
+        assert_eq!(api.store.issue_counts(id).unwrap(), (0, 0, 1));
+
+        // an unknown id is caught before anything runs
+        let unknown = tool_text(api.clone(), "triage_errors",
+            json!({ "slug": "codo", "issue_ids": [9999], "action": "resolve" })).await;
+        assert!(unknown.contains("no issue(s) #9999"), "{unknown}");
+        assert!(unknown.contains("Existing ids"), "{unknown}");
+
+        // and a bad action does not silently do nothing
+        let bad = tool_text(api, "triage_errors",
+            json!({ "slug": "codo", "issue_ids": [i1], "action": "explode" })).await;
+        assert!(bad.contains("is not an action"), "{bad}");
+    }
+
+    #[tokio::test]
+    async fn database_tools_are_clear_about_what_they_cannot_do() {
+        let api = crate::server::tests::api_with_data();
+        let info = tool_text(api.clone(), "db_info", json!({ "slug": "codo" })).await;
+        assert!(info.contains("has no database"), "{info}");
+        let backup = tool_text(api.clone(), "db_backup", json!({ "slug": "codo" })).await;
+        assert!(backup.contains("has no database"), "{backup}");
+
+        // sqlite is honest about not being backed up
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        api.store.set_database(id, &crate::store::Database {
+            kind: "sqlite".into(), container: None, db_name: None, username: None, password: None,
+            volume: Some("codo-data".into()), file_path: Some("/data/app.db".into()),
+            persisted: false, created_at: 1,
+        }).unwrap();
+        let sqlite_backup = tool_text(api.clone(), "db_backup", json!({ "slug": "codo" })).await;
+        assert!(sqlite_backup.contains("only backs up Postgres"), "{sqlite_backup}");
+
+        // db_rows needs a table, and never interpolates one it did not verify
+        let no_table = tool_text(api, "db_rows", json!({ "slug": "codo" })).await;
+        assert!(no_table.contains("needs a table"), "{no_table}");
     }
 
     #[tokio::test]

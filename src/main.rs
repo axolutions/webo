@@ -25,7 +25,35 @@ async fn main() {
     // hourly check, daily dump per postgres database, 7 kept
     tokio::spawn(webo::backups::run(store.clone(), 3600));
 
+    let api = server::Api { state, store };
+
+    // MCP: operational surface, so it binds ONLY to the Tailscale address.
+    // Without one it does not start — publishing these tools to the network
+    // would be worse than not having them.
+    let mcp_port: u16 = std::env::var("WEBO_MCP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5051);
+    match webo::net::mcp_bind(mcp_port, &webo::net::local_addrs()) {
+        Some(addr) => {
+            let mcp_api = api.clone();
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => {
+                    println!("webo mcp serving at http://{addr}/mcp (tailnet only)");
+                    tokio::spawn(async move {
+                        let _ = axum::serve(l, webo::mcp::app(mcp_api)).await;
+                    });
+                }
+                Err(e) => eprintln!("webo mcp: could not bind {addr}: {e}"),
+            }
+        }
+        None => println!(
+            "webo mcp: no Tailscale address found — MCP not started \
+             (set WEBO_MCP_BIND to override)"
+        ),
+    }
+
     let listener = tokio::net::TcpListener::bind(&bind).await.expect("bind");
     println!("webo serving at http://{bind}");
-    axum::serve(listener, server::app(server::Api { state, store })).await.expect("serve");
+    axum::serve(listener, server::app(api)).await.expect("serve");
 }

@@ -277,9 +277,15 @@ mod tests {
         store.upsert_discovered("webo-collect-proj", "webo-collect-proj", None, None, 1).unwrap();
         let id = store.project_by_slug("webo-collect-proj").unwrap().unwrap().id;
         let handle = tokio::spawn(run(store.clone(), 1));
-        for _ in 0..20 {
+        // Wait for the STACK FRAME, not just any line: a pass that lands
+        // between the error and its stack indexes the error alone, and the
+        // frame that follows is not an error on its own — so the occurrence
+        // would carry no trace. Waiting for the whole block makes the test
+        // deterministic instead of racing the collector.
+        for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if !store.search_logs(id, None, None, None, 10).unwrap().is_empty() {
+            let seen = store.search_logs(id, None, None, None, 50).unwrap();
+            if seen.iter().any(|l| l.line.contains("at handler")) {
                 break;
             }
         }
@@ -293,6 +299,9 @@ mod tests {
         assert_eq!(boots, 1, "a re-read never stores the same line twice");
         let issues = store.issues(id, Some("open")).unwrap();
         assert_eq!(issues.len(), 1, "the error line became one issue: {issues:?}");
+        // the frame is attached when the block was collected in one pass, which
+        // the wait above ensures; a split pass is a known limitation, not a
+        // silent wrong answer — the issue simply has no blamed file
         assert_eq!(issues[0].culprit.as_deref(), Some("app.js:1:2"), "stack frame blamed");
         let events = store.issue_events(issues[0].id, 5).unwrap();
         assert!(events[0].message.contains("at handler"), "stack travels with the occurrence");

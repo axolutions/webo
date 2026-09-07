@@ -132,6 +132,10 @@ port gets a 301 and that is expected, not a bug.
   status, not a new error.
 - Rails stamps each line of a request with a request id. It is stripped before
   fingerprinting, or the same bug on two requests becomes two issues.
+- A stack trace is attached to its error when both land in the same collection
+  pass. If a pass falls between the error line and its frames, the issue is
+  still grouped correctly but carries no blamed file — the frames alone are not
+  an error, so they are not stored as one.
 - Browser errors are optional and arrive through a public ingest endpoint. The
   snippet sends `text/plain` on purpose: `application/json` would need a CORS
   preflight, and `sendBeacon` cannot preflight — it just silently fails.

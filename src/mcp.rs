@@ -1798,6 +1798,105 @@ mod tests {
         assert!(no_table.contains("needs a table"), "{no_table}");
     }
 
+    /// The database tools against a real Postgres — the only way to exercise
+    /// the paths that matter (a write taking a backup first, a restore putting
+    /// the data back). Skips where no docker daemon is reachable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_database_tools_work_against_a_real_postgres() {
+        let docker = std::process::Command::new("docker")
+            .args(["info"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !docker {
+            eprintln!("docker unavailable — skipping the live database tools test");
+            return;
+        }
+        let _env = crate::testutil::env_lock();
+        let slug = format!("webomcp{}", std::process::id());
+        let net = format!("{slug}-net");
+        let _ = std::process::Command::new("docker").args(["network", "create", &net]).output();
+        std::env::set_var("WEBO_APP_NETWORK", &net);
+        let dir = std::env::temp_dir().join(format!("webo-mcpbk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("WEBO_BACKUPS_DIR", dir.to_string_lossy().to_string());
+
+        let api = crate::server::tests::api_with_data();
+        api.store.upsert_discovered(&slug, &slug, None, None, 1).unwrap();
+        let id = api.store.project_by_slug(&slug).unwrap().unwrap().id;
+        let db = crate::db::create_postgres(&slug, &net, "17").await.expect("postgres");
+        api.store.set_database(id, &db).unwrap();
+        crate::db::pg_query(&db, &net, "CREATE TABLE notes (id int, body text); INSERT INTO notes VALUES (1, 'ola');", true)
+            .await
+            .expect("seed");
+
+        // db_info names the engine and lists the table
+        let info = tool_text(api.clone(), "db_info", json!({ "slug": slug })).await;
+        assert!(info.contains("postgres in its own container"), "{info}");
+        assert!(info.contains("notes"), "{info}");
+
+        // db_rows reads it back, aligned, with the total
+        let rows = tool_text(api.clone(), "db_rows", json!({ "slug": slug, "table": "notes" })).await;
+        assert!(rows.contains("ola"), "{rows}");
+        assert!(rows.contains("of 1"), "the total is stated: {rows}");
+        // an unknown table is refused by name, never interpolated
+        let bad_table = tool_text(api.clone(), "db_rows", json!({ "slug": slug, "table": "nope" })).await;
+        assert!(bad_table.contains("has no table 'nope'"), "{bad_table}");
+        // and an invalid order column too
+        let bad_order = tool_text(
+            api.clone(), "db_rows",
+            json!({ "slug": slug, "table": "notes", "order_by": "id; DROP TABLE notes" }),
+        ).await;
+        assert!(bad_order.contains("not a valid column name"), "{bad_order}");
+
+        // a read through db_query needs no flag
+        let read = tool_text(api.clone(), "db_query", json!({ "slug": slug, "sql": "SELECT body FROM notes" })).await;
+        assert!(read.contains("ola"), "{read}");
+
+        // a write takes a backup FIRST and says which file
+        let write = tool_text(
+            api.clone(), "db_query",
+            json!({ "slug": slug, "sql": "INSERT INTO notes VALUES (2, 'segunda')", "write": true }),
+        ).await;
+        assert!(write.starts_with("Backed up to "), "the dump comes before the write: {write}");
+        assert!(write.contains(".sql.gz"), "{write}");
+        let after = tool_text(api.clone(), "db_query", json!({ "slug": slug, "sql": "SELECT count(*) FROM notes" })).await;
+        assert!(after.contains('2'), "the write landed: {after}");
+
+        // taking one on demand reaches pg_dump and comes back named
+        let created = tool_text(api.clone(), "db_backup", json!({ "slug": slug, "action": "create" })).await;
+        assert!(created.contains("Backed up"), "{created}");
+
+        // Listing reads the mounted volume, which in production is the same
+        // place the helper wrote to; here the helper writes into the docker
+        // volume and the test reads a temp dir, so the file is planted. The
+        // real dump→restore roundtrip is covered in backups.rs.
+        let empty = tool_text(api.clone(), "db_backup", json!({ "slug": slug })).await;
+        assert!(empty.contains("no backups yet"), "an empty list says so: {empty}");
+        std::fs::create_dir_all(dir.join(&slug)).unwrap();
+        std::fs::write(dir.join(&slug).join("20260907-040000.sql.gz"), b"planted").unwrap();
+        let listed = tool_text(api.clone(), "db_backup", json!({ "slug": slug })).await;
+        assert!(listed.contains("20260907-040000.sql.gz"), "{listed}");
+        assert!(listed.contains("7 B"), "the size is formatted: {listed}");
+
+        // restore refuses without confirmation, and says what it would do
+        let refused = tool_text(
+            api.clone(), "db_backup",
+            json!({ "slug": slug, "action": "restore", "file": "20260907-040000.sql.gz" }),
+        ).await;
+        assert!(refused.contains("confirm:true"), "{refused}");
+        assert!(refused.contains("overwrite"), "it says what happens: {refused}");
+        // and restore without a file name says which argument is missing
+        let no_file = tool_text(api.clone(), "db_backup", json!({ "slug": slug, "action": "restore" })).await;
+        assert!(no_file.contains("needs the file name"), "{no_file}");
+
+        crate::db::drop_postgres(db.container.as_deref().unwrap(), db.volume.as_deref()).await.ok();
+        let _ = std::process::Command::new("docker").args(["network", "rm", &net]).output();
+        std::fs::remove_dir_all(&dir).ok();
+        std::env::remove_var("WEBO_BACKUPS_DIR");
+        std::env::remove_var("WEBO_APP_NETWORK");
+    }
+
     #[tokio::test]
     async fn unknown_methods_and_tools_fail_cleanly() {
         let api = crate::server::tests::api_with_data();

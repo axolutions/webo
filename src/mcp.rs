@@ -77,7 +77,31 @@ is wrong, list_errors gives grouped issues and error_detail gives the stack \
 trace; search_logs finds the lines around it. db_info shows a project's schema \
 before db_rows or db_query read from it. Tools that change something say so in \
 their annotations and need an explicit argument — nothing here writes by \
-accident. Read webo://runbook before suggesting any change to the server.";
+accident, and every write is recorded in webo's own logs. Variable values are \
+always masked. Read webo://runbook before suggesting any change to the server.";
+
+/// Every call that changes something is written to stdout, which webo's own
+/// log collector indexes like any other container — so what the agent did is
+/// visible in the panel, next to everything else, and survives a restart.
+/// Without this there is no way to find out afterwards.
+fn audit(tool: &str, params: &Value, outcome: &str) {
+    let args = params
+        .get("arguments")
+        .map(|a| {
+            // arguments are small by design; a SQL statement is the exception
+            let text = a.to_string();
+            if text.len() > 400 { format!("{}…", &text[..400]) } else { text }
+        })
+        .unwrap_or_else(|| "{}".into());
+    println!("[webo-mcp] {tool} {args} -> {outcome}");
+}
+
+/// The tools that change something. Kept as one list so audit and the
+/// annotations cannot drift apart.
+const WRITE_TOOLS: [&str; 8] = [
+    "db_query", "db_backup", "triage_errors",
+    "create_project", "deploy_project", "project_env", "connect_domain", "delete_project",
+];
 
 /// A tool's answer: text the model reads.
 fn text(body: impl Into<String>) -> Value {
@@ -313,6 +337,82 @@ fn tool_catalog() -> Vec<Value> {
             ),
             true,
         ),
+        write_tool(
+            "create_project",
+            "Register a GitHub repository as a project: detects the stack (Rails or Next) and the \
+             Ruby or Node version, and returns the scaffold plan. It does NOT deploy — call \
+             deploy_project after showing the plan.",
+            schema(
+                json!({
+                    "repo_owner": { "type": "string", "description": "GitHub owner or organisation." },
+                    "repo_name": { "type": "string", "description": "Repository name." }
+                }),
+                vec!["repo_owner", "repo_name"],
+            ),
+            false,
+        ),
+        write_tool(
+            "deploy_project",
+            "Run the first deploy of a registered project: creates the database if asked for, writes \
+             the variables, commits the scaffold and reserves the automatic domain — which starts \
+             the build on GitHub Actions. This is the call that changes the world.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": "The project, as returned by create_project." },
+                    "database": { "type": "string", "enum": ["managed", "external", "none"], "description": "managed creates a Postgres container; external takes database_url; defaults to none." },
+                    "pg_version": { "type": "string", "enum": ["17", "16", "15"], "description": "For a managed database. Defaults to 17." },
+                    "database_url": { "type": "string", "description": "Required when database is external." },
+                    "env": { "type": "object", "description": "Environment variables to write before the first deploy." }
+                }),
+                vec!["slug"],
+            ),
+            false,
+        ),
+        write_tool(
+            "project_env",
+            "List, set or remove a project's environment variables. Values are ALWAYS masked — this \
+             tool never returns a secret in clear text, by design. Setting one rewrites the app's \
+             .env on the server; it takes effect on the next deploy.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "action": { "type": "string", "enum": ["list", "set", "delete"], "description": "Defaults to list." },
+                    "key": { "type": "string", "description": "Variable name, for set and delete." },
+                    "value": { "type": "string", "description": "The value, for set." }
+                }),
+                vec!["slug"],
+            ),
+            false,
+        ),
+        write_tool(
+            "connect_domain",
+            "Connect or disconnect a custom domain. Inside webo's own Cloudflare zone the DNS record \
+             is created automatically; elsewhere the answer says which CNAME to point. The automatic \
+             domain is never touched.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "action": { "type": "string", "enum": ["connect", "disconnect"], "description": "Defaults to connect." },
+                    "domain": { "type": "string", "description": "Hostname to connect, e.g. app.example.com." }
+                }),
+                vec!["slug"],
+            ),
+            false,
+        ),
+        write_tool(
+            "delete_project",
+            "Stop and remove a project's containers. Needs confirm to equal the slug exactly. Volumes \
+             and images are NEVER removed through MCP — deleting data is a panel-only action, where \
+             a person is looking. The GitHub repository is untouched.",
+            schema(
+                json!({
+                    "slug": { "type": "string", "description": SLUG_DESC },
+                    "confirm": { "type": "string", "description": "Must equal the slug, exactly as the panel makes you type it." }
+                }),
+                vec!["slug", "confirm"],
+            ),
+            true,
+        ),
         tool(
             "error_detail",
             "The occurrences of one issue with the full stack trace and where it came from. This \
@@ -347,17 +447,52 @@ fn resource_catalog() -> Vec<Value> {
 }
 
 fn prompt_catalog() -> Vec<Value> {
-    vec![json!({
-        "name": "diagnose_project",
-        "description": "Work out why a project is failing or slow, in the order that avoids dead ends.",
-        "arguments": [{ "name": "slug", "description": SLUG_DESC, "required": true }],
-    })]
+    vec![
+        json!({
+            "name": "diagnose_project",
+            "description": "Work out why a project is failing or slow, in the order that avoids dead ends.",
+            "arguments": [{ "name": "slug", "description": SLUG_DESC, "required": true }],
+        }),
+        json!({
+            "name": "why_did_deploy_fail",
+            "description": "Find out why a deploy did not go up, checking the failure modes that have actually happened on this server.",
+            "arguments": [{ "name": "slug", "description": SLUG_DESC, "required": true }],
+        }),
+        json!({
+            "name": "explore_data",
+            "description": "Answer a question from a project's database, reading the schema before writing any SQL.",
+            "arguments": [
+                { "name": "slug", "description": SLUG_DESC, "required": true },
+                { "name": "question", "description": "What you want to know from the data.", "required": false },
+            ],
+        }),
+    ]
 }
 
 // ---------------------------------------------------------------- tools
 
 async fn call_tool(api: &Api, params: &Value) -> Result<Value, String> {
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let out = dispatch(api, name, params).await;
+    if WRITE_TOOLS.contains(&name) {
+        // the first line of the answer says what happened, and a refusal is as
+        // worth recording as a change
+        let outcome = match &out {
+            Ok(v) => v["content"][0]["text"]
+                .as_str()
+                .and_then(|t| t.lines().next())
+                .unwrap_or("done")
+                .chars()
+                .take(160)
+                .collect::<String>(),
+            Err(e) => format!("REFUSED: {e}"),
+        };
+        audit(name, params, &outcome);
+    }
+    out
+}
+
+async fn dispatch(api: &Api, name: &str, params: &Value) -> Result<Value, String> {
     match name {
         "server_health" => Ok(text(server_health(api).await)),
         "server_processes" => Ok(text(server_processes(api, params).await)),
@@ -373,6 +508,11 @@ async fn call_tool(api: &Api, params: &Value) -> Result<Value, String> {
         "db_query" => run(api, params, db_query).await,
         "db_backup" => run(api, params, db_backup).await,
         "triage_errors" => run(api, params, triage_errors).await,
+        "create_project" => create_project(api, params).await,
+        "deploy_project" => run(api, params, deploy_project).await,
+        "project_env" => run(api, params, project_env).await,
+        "connect_domain" => run(api, params, connect_domain).await,
+        "delete_project" => run(api, params, delete_project).await,
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -1323,6 +1463,247 @@ async fn triage_errors(api: Api, p: crate::store::Project, params: Value) -> Str
     )
 }
 
+// ---------------------------------------------------------------- operating
+
+/// create_project takes a repo, not a slug, so it does not go through `run`.
+async fn create_project(api: &Api, params: &Value) -> Result<Value, String> {
+    let (Some(owner), Some(name)) = (arg_str(params, "repo_owner"), arg_str(params, "repo_name")) else {
+        return Err("create_project needs repo_owner and repo_name".into());
+    };
+    let req = crate::server::CreateProject { repo_owner: owner.clone(), repo_name: name.clone() };
+    match crate::server::do_create_project(api, req).await {
+        Err((_, msg)) => Err(msg),
+        Ok(v) if v["supported"] == false => Ok(text(format!(
+            "{owner}/{name} is {lang} — webo has no template for it yet, so it cannot be deployed \
+             from here. Rails and Next.js are supported today.",
+            lang = v["language"].as_str().unwrap_or("an unsupported stack")
+        ))),
+        Ok(v) => {
+            let files: Vec<String> = v["files"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|f| f.as_str().map(|s| format!("  {s}"))).collect())
+                .unwrap_or_default();
+            let secrets: Vec<String> = v["secrets"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|s| {
+                            format!(
+                                "  {} {}",
+                                s["name"].as_str().unwrap_or(""),
+                                if s["configured"] == true { "configured" } else { "MISSING on this server" }
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(text(format!(
+                "Registered {owner}/{name} as '{slug}'.\n\n\
+                 stack       {tech} (template: {tpl}){ruby}\n\
+                 branch      {branch}\n\
+                 Dockerfile  {docker}\n\
+                 \n\
+                 These files will be committed on deploy:\n{files}\n\
+                 \n\
+                 Deploy secrets:\n{secrets}\n\
+                 \n\
+                 Nothing has been deployed. Call deploy_project with slug '{slug}' when the plan \
+                 above looks right — that is what commits and starts the build.",
+                slug = v["slug"].as_str().unwrap_or(""),
+                tech = v["tech"].as_str().unwrap_or(""),
+                tpl = v["template"].as_str().unwrap_or(""),
+                ruby = v["ruby"].as_str().map(|r| format!(" on ruby {r}")).unwrap_or_default(),
+                branch = v["branch"].as_str().unwrap_or(""),
+                docker = if v["has_dockerfile"] == true { "already in the repo — yours is kept" } else { "will be scaffolded" },
+                files = files.join("\n"),
+                secrets = secrets.join("\n"),
+            )))
+        }
+    }
+}
+
+async fn deploy_project(api: Api, p: crate::store::Project, params: Value) -> String {
+    let database = arg_str(&params, "database").unwrap_or_else(|| "none".into());
+    let env: std::collections::BTreeMap<String, String> = params
+        .get("arguments")
+        .and_then(|a| a.get("env"))
+        .and_then(|v| v.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let req = crate::server::ProvisionReq {
+        db: Some(database.clone()),
+        pg_version: arg_str(&params, "pg_version"),
+        database_url: arg_str(&params, "database_url"),
+        env,
+    };
+    match crate::server::do_provision(&api, &p.slug, req).await {
+        Err((_, msg)) => format!("Deploy did not start: {msg}"),
+        Ok(v) => {
+            let secrets: Vec<String> = v["secrets"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|s| format!("{} {}", s["name"].as_str().unwrap_or(""), s["status"].as_str().unwrap_or("")))
+                        .collect()
+                })
+                .unwrap_or_default();
+            format!(
+                "Deploying {slug}.\n\n\
+                 commit      {sha}\n\
+                 domain      {domain}\n\
+                 database    {db}\n\
+                 variables   {env}\n\
+                 secrets     {secrets}\n\
+                 \n\
+                 The build is running on GitHub Actions now. Call project_status in a couple of \
+                 minutes to see whether it went up.",
+                slug = p.slug,
+                sha = v["commit_sha"].as_str().unwrap_or("?"),
+                domain = v["auto_domain"].as_str().map(|d| format!("https://{d}")).unwrap_or_else(|| "none — Cloudflare is not configured".into()),
+                db = match database.as_str() {
+                    "managed" => v["database"]["container"].as_str().map(|c| format!("postgres in {c}")).unwrap_or_else(|| "managed".into()),
+                    "external" => "external, URL stored".into(),
+                    _ => "none".into(),
+                },
+                env = if v["env_written"] == true { "written to the app's .env" } else { "COULD NOT be written — check the server" },
+                secrets = secrets.join(", "),
+            )
+        }
+    }
+}
+
+async fn project_env(api: Api, p: crate::store::Project, params: Value) -> String {
+    let action = arg_str(&params, "action").unwrap_or_else(|| "list".into());
+    match action.as_str() {
+        "set" => {
+            let (Some(key), Some(value)) = (arg_str(&params, "key"), params.get("arguments").and_then(|a| a.get("value")).and_then(|v| v.as_str()))
+            else {
+                return "set needs key and value.".into();
+            };
+            if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return format!("'{key}' is not a valid variable name.");
+            }
+            if api.store.env_vars(p.id).unwrap_or_default().iter().any(|v| v.key == key && v.managed) {
+                return format!(
+                    "{key} is managed by webo (it comes with the database) and cannot be set by hand."
+                );
+            }
+            let _ = api.store.set_env(p.id, &key, value, false);
+            let written = crate::server::materialize_env(&api, &p.slug).await.is_ok();
+            format!(
+                "Set {key} on {slug}.{note} It takes effect on the next deploy.",
+                slug = p.slug,
+                note = if written { " The app's .env was rewritten." } else { " WARNING: the .env could not be written on the server." },
+            )
+        }
+        "delete" => {
+            let Some(key) = arg_str(&params, "key") else { return "delete needs a key.".into() };
+            if api.store.delete_env(p.id, &key).unwrap_or(false) {
+                let _ = crate::server::materialize_env(&api, &p.slug).await;
+                format!("Removed {key} from {}.", p.slug)
+            } else {
+                format!("{key} is either managed by webo or does not exist on {}.", p.slug)
+            }
+        }
+        _ => {
+            let vars = api.store.env_vars(p.id).unwrap_or_default();
+            let shown: Vec<&crate::store::EnvVar> =
+                vars.iter().filter(|v| !v.key.starts_with("__WEBO_")).collect();
+            if shown.is_empty() {
+                return format!("{} has no variables set.", p.slug);
+            }
+            let rows: Vec<String> = shown
+                .iter()
+                .map(|v| {
+                    format!(
+                        "  {:<28} {}{}",
+                        v.key,
+                        crate::server::mask(&v.value),
+                        if v.managed { "  (managed by webo)" } else { "" }
+                    )
+                })
+                .collect();
+            format!(
+                "{slug} · {n} variables\n\n{rows}\n\nValues are masked and this tool never returns \
+                 them in clear text. Read one in the panel if you must.",
+                slug = p.slug,
+                n = shown.len(),
+                rows = rows.join("\n"),
+            )
+        }
+    }
+}
+
+async fn connect_domain(api: Api, p: crate::store::Project, params: Value) -> String {
+    let action = arg_str(&params, "action").unwrap_or_else(|| "connect".into());
+    if action == "disconnect" {
+        if p.custom_domain.is_none() {
+            return format!("{} has no custom domain connected.", p.slug);
+        }
+        return match crate::server::do_disconnect_domain(&api, &p.slug).await {
+            Ok(()) => format!(
+                "Disconnected {}. The automatic domain{} still works.",
+                p.custom_domain.clone().unwrap_or_default(),
+                p.auto_domain.map(|a| format!(" ({a})")).unwrap_or_default()
+            ),
+            Err((_, msg)) => format!("Could not disconnect: {msg}"),
+        };
+    }
+    let Some(domain) = arg_str(&params, "domain") else {
+        return "connect needs a domain.".into();
+    };
+    match crate::server::do_connect_domain(&api, &p.slug, &domain).await {
+        Err((_, msg)) => format!("Could not connect {domain}: {msg}"),
+        Ok(v) => {
+            if v["dns_managed"] == true {
+                format!(
+                    "Connected {domain} to {slug}. The DNS record was created in webo's zone and is \
+                     propagating — it usually answers within a minute.",
+                    slug = p.slug
+                )
+            } else {
+                format!(
+                    "Connected {domain} to {slug}. It is outside webo's zone, so point a CNAME at \
+                     {target} on your own DNS — until then the hostname will not resolve.",
+                    slug = p.slug,
+                    target = v["cname_target"].as_str().unwrap_or("the tunnel")
+                )
+            }
+        }
+    }
+}
+
+async fn delete_project(api: Api, p: crate::store::Project, params: Value) -> String {
+    if p.slug == "webo" {
+        return "webo cannot delete itself.".into();
+    }
+    let confirm = arg_str(&params, "confirm").unwrap_or_default();
+    if confirm != p.slug {
+        return format!(
+            "To delete {slug}, pass confirm exactly equal to the slug: confirm:\"{slug}\".\n\
+             This stops and removes its containers. Volumes (the data) and images are NEVER removed \
+             through MCP — that is a panel-only action. The GitHub repository is untouched.",
+            slug = p.slug
+        );
+    }
+    // containers only: deleting data is a decision for a person at the panel
+    let opts = crate::projects::TeardownOpts { containers: true, volumes: false, images: false };
+    let report = crate::server::do_delete_project(&api, &p.slug, opts).await;
+    match report {
+        Err((_, msg)) => format!("Could not delete: {msg}"),
+        Ok(r) => format!(
+            "Deleted {slug}: {n} container(s) removed. Its volumes and images are still on the \
+             server, and so is the GitHub repository — remove those from the panel if you mean to.",
+            slug = p.slug,
+            n = r["containers_removed"].as_u64().unwrap_or(0),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------- resources
 
 /// The knowledge that until now only lived in session memory.
@@ -1343,15 +1724,32 @@ async fn read_resource(api: &Api, params: &Value) -> Result<Value, String> {
 
 fn get_prompt(params: &Value) -> Result<Value, String> {
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-    if name != "diagnose_project" {
-        return Err(format!("unknown prompt: {name}"));
-    }
     let slug = params
         .get("arguments")
         .and_then(|a| a.get("slug"))
         .and_then(|v| v.as_str())
         .unwrap_or("the project");
-    let body = format!(
+    let body = match name {
+        "diagnose_project" => diagnose_prompt(slug),
+        "why_did_deploy_fail" => deploy_failure_prompt(slug),
+        "explore_data" => {
+            let question = params
+                .get("arguments")
+                .and_then(|a| a.get("question"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("the question you were asked");
+            explore_data_prompt(slug, question)
+        }
+        other => return Err(format!("unknown prompt: {other}")),
+    };
+    Ok(json!({
+        "description": format!("{name} for {slug}"),
+        "messages": [{ "role": "user", "content": { "type": "text", "text": body } }],
+    }))
+}
+
+fn diagnose_prompt(slug: &str) -> String {
+    format!(
         "Work out what is wrong with {slug} on this server. Follow this order — it is the one \
          that avoids dead ends:\n\
          \n\
@@ -1366,11 +1764,48 @@ fn get_prompt(params: &Value) -> Result<Value, String> {
          \n\
          Finish with: what is broken, the evidence for it, and the smallest change that would fix \
          it. If the evidence does not support a conclusion, say what is missing instead of guessing."
-    );
-    Ok(json!({
-        "description": format!("Diagnose {slug}"),
-        "messages": [{ "role": "user", "content": { "type": "text", "text": body } }],
-    }))
+    )
+}
+
+/// The failure modes below are the ones that have actually broken a deploy on
+/// this server. An agent that checks these first is checking reality, not a
+/// generic list.
+fn deploy_failure_prompt(slug: &str) -> String {
+    format!(
+        "Find out why the last deploy of {slug} did not go up. Check in this order — these are \
+         the failures that have really happened here:\n\
+         \n\
+         1. project_status({slug}) — did the build fail, or did it pass and the container still \
+            not come up? Those are different problems.\n\
+         2. If the build failed, the cause is usually in the repo: a Gemfile pinned to a Ruby the \
+            image does not have, or a dependency the Dockerfile never installs.\n\
+         3. If the build passed but nothing is running: tail_logs({slug}) — a container that \
+            starts and exits leaves its reason in the last lines.\n\
+         4. project_env({slug}) — compare what is set against what the app needs. An app booting \
+            with no configuration usually means the .env landed in the wrong directory.\n\
+         5. list_errors({slug}) — a crash loop shows up here as one issue repeating.\n\
+         \n\
+         Read webo://runbook: it lists the conventions that, when broken, produce exactly these \
+         symptoms. Finish with the cause and the smallest fix, or with what you would need to \
+         look at next."
+    )
+}
+
+fn explore_data_prompt(slug: &str, question: &str) -> String {
+    format!(
+        "Answer this from {slug}'s database: {question}\n\
+         \n\
+         Read the schema before writing SQL — inventing a column name is the usual way this goes \
+         wrong:\n\
+         \n\
+         1. db_info({slug}) — the tables and roughly how big they are.\n\
+         2. db_rows on the table that looks right — seeing real values tells you what the columns \
+            actually hold, which the names often do not.\n\
+         3. db_query only when the answer needs aggregation or a join.\n\
+         \n\
+         Stay read-only. If answering would require changing data, say so and stop — a write needs \
+         write:true and takes a backup first, and that is the user's call, not yours."
+    )
 }
 
 #[cfg(test)]
@@ -1697,10 +2132,259 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_declared_prompt_can_actually_be_fetched() {
+        let api = crate::server::tests::api_with_data();
+        let list = rpc_call(api.clone(), "prompts/list", json!({})).await;
+        let names: Vec<String> = list["result"]["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"why_did_deploy_fail".to_string()), "{names:?}");
+        assert!(names.contains(&"explore_data".to_string()), "{names:?}");
+
+        // a prompt in the catalog that prompts/get does not answer is a dead
+        // entry the agent only discovers when it asks for it
+        for name in &names {
+            let got = rpc_call(
+                api.clone(),
+                "prompts/get",
+                json!({ "name": name, "arguments": { "slug": "codo" } }),
+            )
+            .await;
+            let body = got["result"]["messages"][0]["content"]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} is listed but not served: {got}"));
+            assert!(body.contains("codo"), "{name} ignores its slug: {body}");
+        }
+
+        let deploy = rpc_call(
+            api.clone(),
+            "prompts/get",
+            json!({ "name": "why_did_deploy_fail", "arguments": { "slug": "codo" } }),
+        )
+        .await;
+        let body = deploy["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        let at = |needle: &str| body.find(needle).unwrap_or(usize::MAX);
+        assert!(at("project_status") < at("tail_logs"), "status before logs: {body}");
+        assert!(body.contains(".env"), "it knows where the .env goes wrong: {body}");
+
+        // the data prompt must not send the agent writing
+        let data = rpc_call(
+            api.clone(),
+            "prompts/get",
+            json!({ "name": "explore_data", "arguments": { "slug": "codo", "question": "how many users" } }),
+        )
+        .await;
+        let body = data["result"]["messages"][0]["content"]["text"].as_str().unwrap();
+        assert!(body.contains("how many users"), "the question is carried through: {body}");
+        assert!(at2(body, "db_info") < at2(body, "db_query"), "schema before SQL: {body}");
+        assert!(body.contains("Stay read-only"), "{body}");
+
+        let unknown = rpc_call(api, "prompts/get", json!({ "name": "nope" })).await;
+        assert!(unknown["error"]["message"].as_str().unwrap().contains("unknown prompt"));
+    }
+    fn at2(body: &str, needle: &str) -> usize {
+        body.find(needle).unwrap_or(usize::MAX)
+    }
+
+    #[tokio::test]
+    async fn creating_a_project_through_mcp_goes_through_the_same_wizard() {
+        let _env = crate::testutil::env_lock();
+        let base = crate::server::tests::mock_github().await;
+        std::env::set_var("WEBO_GITHUB_API_BASE", &base);
+        std::env::set_var("WEBO_GITHUB_TOKEN", "test-token");
+        std::env::set_var("WEBO_DEPLOY_TOKEN", "deploy-secret");
+        let api = crate::server::tests::api_with_data();
+
+        let body = tool_text(
+            api.clone(),
+            "create_project",
+            json!({ "repo_owner": "muri", "repo_name": "axofin" }),
+        )
+        .await;
+        assert!(body.contains("rails"), "the template is named: {body}");
+        assert!(body.contains(".github/workflows/deploy.yml"), "the files are listed: {body}");
+        assert!(
+            body.to_lowercase().contains("nothing has been deployed")
+                || body.to_lowercase().contains("not deployed"),
+            "it must not read as a finished deploy: {body}"
+        );
+        // the project really exists now, exactly as the panel would have made it
+        let p = api.store.project_by_slug("axofin").unwrap().unwrap();
+        assert_eq!(p.source, "registered");
+
+        // a stack with no template is refused in words, not with an error
+        let body = tool_text(
+            api.clone(),
+            "create_project",
+            json!({ "repo_owner": "muri", "repo_name": "notas" }),
+        )
+        .await;
+        assert!(body.contains("Python"), "{body}");
+        assert!(body.contains("no template"), "{body}");
+
+        let out = rpc_call(api, "tools/call", json!({ "name": "create_project", "arguments": {} })).await;
+        assert!(out["error"]["message"].as_str().unwrap().contains("repo_owner"));
+
+        std::env::remove_var("WEBO_GITHUB_API_BASE");
+        std::env::remove_var("WEBO_GITHUB_TOKEN");
+        std::env::remove_var("WEBO_DEPLOY_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn environment_variables_are_set_and_removed_but_never_shown() {
+        let api = crate::server::tests::api_with_data();
+        let p = api.store.project_by_slug("codo").unwrap().unwrap();
+        api.store.set_env(p.id, "STRIPE_KEY", "sk_live_51H8totallysecret", false).unwrap();
+
+        let body = tool_text(api.clone(), "project_env", json!({ "slug": "codo" })).await;
+        assert!(body.contains("STRIPE_KEY"), "the key is listed: {body}");
+        assert!(!body.contains("51H8totallysecret"), "the value leaked: {body}");
+
+        // setting one answers with the key, never with what was written
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "SMTP_PASSWORD", "value": "hunter2hunter2" }),
+        )
+        .await;
+        assert!(body.contains("SMTP_PASSWORD"), "{body}");
+        assert!(!body.contains("hunter2hunter2"), "the value leaked: {body}");
+        assert_eq!(
+            api.store.env_vars(p.id).unwrap().iter().find(|v| v.key == "SMTP_PASSWORD").unwrap().value,
+            "hunter2hunter2",
+            "it was really stored"
+        );
+
+        // a name the shell could not export is refused before it is stored
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "not a key", "value": "x" }),
+        )
+        .await;
+        assert!(body.contains("not a valid variable name"), "{body}");
+
+        // a managed variable belongs to webo
+        api.store.set_env(p.id, "DATABASE_URL", "postgres://x", true).unwrap();
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "DATABASE_URL", "value": "postgres://mine" }),
+        )
+        .await;
+        assert!(body.contains("managed by webo"), "{body}");
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "delete", "key": "DATABASE_URL" }),
+        )
+        .await;
+        assert!(body.contains("managed by webo") || body.contains("does not exist"), "{body}");
+
+        // set with no value says what is missing instead of storing an empty one
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "ONLY_A_KEY" }),
+        )
+        .await;
+        assert!(body.contains("needs key and value"), "{body}");
+
+        let body = tool_text(
+            api.clone(),
+            "project_env",
+            json!({ "slug": "codo", "action": "delete", "key": "SMTP_PASSWORD" }),
+        )
+        .await;
+        assert!(body.contains("Removed SMTP_PASSWORD"), "{body}");
+        assert!(
+            !api.store.env_vars(p.id).unwrap().iter().any(|v| v.key == "SMTP_PASSWORD"),
+            "it is really gone"
+        );
+        let body = tool_text(api.clone(), "project_env", json!({ "slug": "codo", "action": "delete" })).await;
+        assert!(body.contains("needs a key"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_domain_is_connected_and_disconnected_through_mcp() {
+        let _env = crate::testutil::env_lock();
+        use axum::routing::{delete as axdelete, get as axget, post as axpost};
+        let router = axum::Router::new()
+            .route(
+                "/zones/{z}/dns_records",
+                axpost(|| async { axum::Json(json!({"success": true, "result": {"id": "rec1"}})) })
+                    .get(|| async { axum::Json(json!({"success": true, "result": [{"id": "rec1"}]})) }),
+            )
+            .route(
+                "/zones/{z}/dns_records/{id}",
+                axdelete(|| async { axum::Json(json!({"success": true, "result": {}})) }),
+            )
+            .route(
+                "/accounts/{a}/cfd_tunnel/{t}/configurations",
+                axget(|| async {
+                    axum::Json(json!({"success": true, "result": {"config": {"ingress": [
+                        {"service": "http_status:404"}]}}}))
+                })
+                .put(|| async { axum::Json(json!({"success": true, "result": {}})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        std::env::set_var("WEBO_CF_API_BASE", format!("http://{addr}"));
+        std::env::set_var("CLOUDFLARE_API_TOKEN", "t");
+        std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acc");
+        std::env::set_var("CLOUDFLARE_ZONE_ID", "zone");
+        std::env::set_var("WEBO_TUNNEL_ID", "tun");
+        std::env::set_var("WEBO_APPS_ZONE", "example.com");
+
+        let api = crate::server::tests::api_with_data();
+        let body = tool_text(
+            api.clone(),
+            "connect_domain",
+            json!({ "slug": "codo", "domain": "https://loja.example.com/" }),
+        )
+        .await;
+        assert!(body.contains("loja.example.com"), "{body}");
+        assert_eq!(
+            api.store.project_by_slug("codo").unwrap().unwrap().custom_domain.as_deref(),
+            Some("loja.example.com"),
+            "the domain is really stored: {body}"
+        );
+
+        // a domain outside our zone: webo routes it and says what the owner must do
+        let body = tool_text(
+            api.clone(),
+            "connect_domain",
+            json!({ "slug": "codo", "domain": "app.terceiros.com" }),
+        )
+        .await;
+        assert!(body.contains("cfargotunnel.com"), "it hands over the CNAME target: {body}");
+
+        let body = tool_text(api.clone(), "connect_domain", json!({ "slug": "codo", "domain": "" })).await;
+        assert!(!body.is_empty(), "an empty domain answers something: {body}");
+
+        // disconnecting is the same tool with no domain
+        let body = tool_text(api.clone(), "connect_domain", json!({ "slug": "codo", "action": "disconnect" })).await;
+        assert!(body.to_lowercase().contains("disconnect") || body.to_lowercase().contains("removed"), "{body}");
+        assert_eq!(
+            api.store.project_by_slug("codo").unwrap().unwrap().custom_domain,
+            None,
+            "it is really gone"
+        );
+
+        for var in ["WEBO_CF_API_BASE", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[tokio::test]
     async fn phase_two_tools_declare_that_they_write() {
         let out = rpc_call(crate::server::tests::api_with_data(), "tools/list", json!({})).await;
         let tools = out["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14, "eleven readers plus three writers");
+        assert_eq!(tools.len(), 19, "eleven readers plus eight writers");
         let by_name = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
 
         // the writers are honest, and the two that can lose data say so
@@ -1895,6 +2579,107 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::env::remove_var("WEBO_BACKUPS_DIR");
         std::env::remove_var("WEBO_APP_NETWORK");
+    }
+
+    #[tokio::test]
+    async fn every_write_tool_is_annotated_and_audited() {
+        let out = rpc_call(crate::server::tests::api_with_data(), "tools/list", json!({})).await;
+        let tools = out["result"]["tools"].as_array().unwrap();
+        // the audit list and the annotations must agree, or a write happens
+        // with no record of it
+        for t in tools {
+            let name = t["name"].as_str().unwrap();
+            let read_only = t["annotations"]["readOnlyHint"] == true;
+            assert_eq!(
+                !read_only,
+                WRITE_TOOLS.contains(&name),
+                "{name}: annotation and the audit list disagree"
+            );
+        }
+        let by_name = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
+        // only deleting a project is marked destructive among the new ones:
+        // the others can be undone or simply redone
+        assert_eq!(by_name("delete_project")["annotations"]["destructiveHint"], true);
+        for n in ["create_project", "deploy_project", "project_env", "connect_domain"] {
+            assert_eq!(by_name(n)["annotations"]["destructiveHint"], false, "{n}");
+        }
+        // create_project promises not to deploy, and delete says what it spares
+        assert!(by_name("create_project")["description"].as_str().unwrap().contains("does NOT deploy"));
+        assert!(by_name("delete_project")["description"].as_str().unwrap().contains("NEVER removed"));
+        assert!(by_name("project_env")["description"].as_str().unwrap().contains("ALWAYS masked"));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_needs_the_slug_and_spares_the_data() {
+        let api = crate::server::tests::api_with_data();
+        // the wrong confirmation refuses and explains the rule
+        let refused = tool_text(
+            api.clone(), "delete_project",
+            json!({ "slug": "codo", "confirm": "yes" }),
+        ).await;
+        assert!(refused.contains("confirm exactly equal to the slug"), "{refused}");
+        assert!(refused.contains("NEVER removed through MCP"), "it says what it will not touch: {refused}");
+        assert!(api.store.project_by_slug("codo").unwrap().is_some(), "nothing was deleted");
+
+        // and webo refuses to delete itself whatever the confirmation
+        api.store.upsert_discovered("webo", "webo", None, None, 1).unwrap();
+        let itself = tool_text(api, "delete_project", json!({ "slug": "webo", "confirm": "webo" })).await;
+        assert!(itself.contains("cannot delete itself"), "{itself}");
+    }
+
+    #[tokio::test]
+    async fn env_values_never_come_back_in_clear_text() {
+        let api = crate::server::tests::api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        api.store.set_env(id, "STRIPE_SECRET_KEY", "sk_live_verysecret_do_not_leak", false).unwrap();
+        api.store.set_env(id, "DATABASE_URL", "postgres://u:p@h/db", true).unwrap();
+
+        let listed = tool_text(api.clone(), "project_env", json!({ "slug": "codo" })).await;
+        assert!(listed.contains("STRIPE_SECRET_KEY"), "the name is shown: {listed}");
+        assert!(
+            !listed.contains("verysecret"),
+            "the value must never reach the model's context: {listed}"
+        );
+        assert!(listed.contains("managed by webo"), "a managed variable is marked: {listed}");
+        assert!(listed.contains("never returns"), "it states the rule: {listed}");
+        // the internal ingest key is not a variable of the app
+        assert!(!listed.contains("__WEBO_"), "{listed}");
+
+        // a managed variable cannot be overwritten by hand
+        let managed = tool_text(
+            api.clone(), "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "DATABASE_URL", "value": "x" }),
+        ).await;
+        assert!(managed.contains("managed by webo"), "{managed}");
+
+        // and an invalid name is refused before touching anything
+        let bad = tool_text(
+            api, "project_env",
+            json!({ "slug": "codo", "action": "set", "key": "bad key!", "value": "x" }),
+        ).await;
+        assert!(bad.contains("not a valid variable name"), "{bad}");
+    }
+
+    #[tokio::test]
+    async fn create_project_is_clear_that_it_did_not_deploy() {
+        let _env = crate::testutil::env_lock();
+        std::env::remove_var("WEBO_GITHUB_TOKEN");
+        let api = crate::server::tests::api_with_data();
+        // with no token the answer says what is missing, it does not panic
+        let out = rpc_call(
+            api,
+            "tools/call",
+            json!({ "name": "create_project", "arguments": { "repo_owner": "muri", "repo_name": "x" } }),
+        )
+        .await;
+        assert!(
+            out["error"]["message"].as_str().unwrap().contains("github token"),
+            "{out}"
+        );
+        // and missing arguments are named
+        let api2 = crate::server::tests::api_with_data();
+        let no_args = rpc_call(api2, "tools/call", json!({ "name": "create_project" })).await;
+        assert!(no_args["error"]["message"].as_str().unwrap().contains("repo_owner"));
     }
 
     #[tokio::test]

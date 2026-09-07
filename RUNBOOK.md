@@ -154,6 +154,26 @@ port gets a 301 and that is expected, not a bug.
   webo itself is deployed. Windows beyond 24h read the 5-minute aggregates
   persisted in SQLite, which do survive.
 
+## What an agent may change through MCP
+
+The MCP server can operate the machine, not just read it. The limits are
+deliberate and they are enforced in code, not by convention:
+
+- **Every write is logged.** Each call to a writing tool prints one
+  `[webo-mcp] <tool> <arguments> -> <outcome>` line to webo's own stdout, which
+  its log collector indexes like any other container. What an agent did is
+  visible in the panel, next to everything else, and survives a restart.
+- **A database write takes a backup first.** `db_query` with `write:true` dumps
+  the database before running the statement and names the file in its answer. If
+  the backup fails the statement does not run — a change that cannot be undone
+  is refused.
+- **Deleting removes containers only.** `delete_project` stops and removes the
+  containers and needs the slug repeated in `confirm`. Volumes and images are
+  never touched through MCP: dropping data stays a panel action. webo also
+  refuses to delete itself.
+- **Environment values never come back in clear text.** `project_env` lists the
+  keys and masks the values, both when reading and after a write.
+
 ## Things never to do
 
 - Do not delete volumes to "clean up". That is the data.

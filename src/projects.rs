@@ -130,14 +130,21 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
         if ticks % 10 == 1 {
             if let Ok(df) = docker.df().await {
                 let mut info = crate::metrics::DockerInfo::default();
-                for i in df.images.unwrap_or_default() {
-                    info.images += 1;
-                    let size = i.size.max(0) as u64;
-                    info.images_bytes += size;
-                    if i.containers == 0 {
-                        info.reclaimable_bytes += size;
-                    }
-                }
+                let images = df.images.unwrap_or_default();
+                info.images = images.len();
+                let naive: u64 = images.iter().map(|i| i.size.max(0) as u64).sum();
+                info.reclaimable_bytes += images
+                    .iter()
+                    .filter(|i| i.containers == 0)
+                    .map(|i| image_unique(i))
+                    .sum::<u64>();
+                // Docker deduplicates for us — summing each image counts every
+                // shared base layer once per image that uses it.
+                info.images_bytes = df
+                    .layers_size
+                    .filter(|v| *v > 0)
+                    .map(|v| v as u64)
+                    .unwrap_or(naive);
                 volume_sizes = df
                     .volumes
                     .unwrap_or_default()
@@ -401,6 +408,13 @@ pub async fn teardown(compose_project: &str, opts: TeardownOpts) -> TeardownRepo
     report
 }
 
+/// What deleting an image would actually free: its own layers, not the base
+/// layers it shares with images that stay. Promising the full size said 324 MB
+/// where 207 MB come back.
+fn image_unique(i: &bollard::models::ImageSummary) -> u64 {
+    (i.size.max(0) as u64).saturating_sub(i.shared_size.max(0) as u64)
+}
+
 /// Bytes under a directory on the host, for bind mounts. Walks it rather than
 /// shelling out to `du`: the tree is small (a project's data), and a failure
 /// to read is simply nothing, never a wrong number.
@@ -428,6 +442,42 @@ fn dir_size(path: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// The numbers on the Docker card: what is on disk, and what a prune
+    /// would really give back. Both used to count shared base layers once per
+    /// image that referenced them.
+    #[test]
+    fn docker_sizes_count_a_shared_layer_once() {
+        let img = |size: i64, shared: i64, containers: i64| bollard::models::ImageSummary {
+            id: format!("sha256:{size}{shared}"),
+            size,
+            shared_size: shared,
+            containers,
+            ..Default::default()
+        };
+        // the real shape from the server: two unused images, one of which
+        // shares 117 MB of base layers with images that are staying
+        let unused_with_base = img(288_811_014, 117_254_548, 0);
+        let unused_alone = img(35_304_823, 0, 0);
+        let in_use = img(333_000_000, 117_254_548, 1);
+
+        assert_eq!(super::image_unique(&unused_with_base), 171_556_466);
+        assert_eq!(super::image_unique(&unused_alone), 35_304_823);
+        let reclaimable: u64 = [&unused_with_base, &unused_alone]
+            .iter()
+            .map(|i| super::image_unique(i))
+            .sum();
+        assert_eq!(reclaimable, 206_861_289, "what a prune actually frees");
+
+        // and the naive sum, which is what the panel showed, is larger than
+        // the disk really holds
+        let naive: u64 = [&unused_with_base, &unused_alone, &in_use]
+            .iter()
+            .map(|i| i.size as u64)
+            .sum();
+        assert!(naive > 600_000_000, "{naive}");
+        assert!(super::image_unique(&in_use) < in_use.size as u64);
+    }
+
     /// A bind mount weighs what its directory weighs — the number `docker df`
     /// cannot give, because it only knows named volumes.
     #[test]

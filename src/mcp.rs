@@ -89,11 +89,33 @@ fn audit(tool: &str, params: &Value, outcome: &str) {
         .get("arguments")
         .map(|a| {
             // arguments are small by design; a SQL statement is the exception
-            let text = a.to_string();
+            let text = redact(a).to_string();
             if text.len() > 400 { format!("{}…", &text[..400]) } else { text }
         })
         .unwrap_or_else(|| "{}".into());
     println!("[webo-mcp] {tool} {args} -> {outcome}");
+}
+
+/// The audit log is written into webo's own logs, which are indexed and shown
+/// in the panel — so it must never carry a secret. The arguments that hold one
+/// are known: the values of `env`, the `value` of a variable being set, and a
+/// `database_url`, which is a password with a hostname attached. Their names
+/// survive, because knowing WHICH variable was set is the whole point of the
+/// record; their contents do not.
+fn redact(args: &Value) -> Value {
+    let mut out = args.clone();
+    let Some(map) = out.as_object_mut() else { return out };
+    if let Some(env) = map.get_mut("env").and_then(|e| e.as_object_mut()) {
+        for (_, v) in env.iter_mut() {
+            *v = json!("<hidden>");
+        }
+    }
+    for key in ["value", "database_url"] {
+        if let Some(v) = map.get_mut(key) {
+            *v = json!("<hidden>");
+        }
+    }
+    out
 }
 
 /// The tools that change something. Kept as one list so audit and the
@@ -2581,6 +2603,39 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::env::remove_var("WEBO_BACKUPS_DIR");
         std::env::remove_var("WEBO_APP_NETWORK");
+    }
+
+    /// The audit line goes into webo's own logs, which anyone with the panel
+    /// can read. A secret passed to a tool must not end up there.
+    #[test]
+    fn the_audit_record_names_the_variables_and_hides_their_values() {
+        let args = json!({
+            "slug": "investos",
+            "database": "none",
+            "env": {
+                "CLERK_SECRET_KEY": "sk_live_realsecret",
+                "MONGODB_URI": "mongodb+srv://user:hunter2@cluster/db",
+            },
+        });
+        let text = redact(&args).to_string();
+        assert!(text.contains("CLERK_SECRET_KEY"), "the key is the point of the record: {text}");
+        assert!(text.contains("MONGODB_URI"), "{text}");
+        assert!(!text.contains("sk_live_realsecret"), "the value leaked: {text}");
+        assert!(!text.contains("hunter2"), "the value leaked: {text}");
+        assert!(text.contains("investos"), "the slug is not a secret: {text}");
+
+        // project_env set, and an external database URL
+        let one = redact(&json!({ "slug": "x", "action": "set", "key": "SMTP_PASSWORD", "value": "hunter2" }));
+        assert!(one.to_string().contains("SMTP_PASSWORD"));
+        assert!(!one.to_string().contains("hunter2"), "{one}");
+        let db = redact(&json!({ "database_url": "postgres://u:pw@host/db" }));
+        assert!(!db.to_string().contains("pw@host"), "{db}");
+
+        // nothing else is touched — a SQL statement is exactly what you want
+        // to find in the record later
+        let sql = json!({ "slug": "x", "sql": "delete from users where id = 1", "write": true });
+        assert_eq!(redact(&sql), sql);
+        assert_eq!(redact(&json!("not an object")), json!("not an object"));
     }
 
     #[tokio::test]

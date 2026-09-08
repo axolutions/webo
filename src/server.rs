@@ -2954,6 +2954,47 @@ mod front_tests {
             "replacing window.fetch breaks clerk-js — attach the token in apiFetch instead"
         );
     }
+
+    /// The question the project search exists to answer — "which app answers on
+    /// garnet-willow-ridge?" — is a domain question, and the repo and the stack
+    /// are the other two handles people arrive with. Narrowing the haystack
+    /// back to the name would quietly bring that dead end back.
+    #[test]
+    fn project_search_looks_past_the_name() {
+        let html = include_str!("../web/index.html");
+        let at = html.find("function projectHaystack").expect("projectHaystack");
+        let body = &html[at..at + 400];
+        for field in ["p.name", "p.slug", "p.domain", "p.url", "p.repo", "p.tech"] {
+            assert!(body.contains(field), "project search stopped looking at {field}");
+        }
+    }
+
+    /// The scope menu and the projects tab are two lists of the same thing.
+    /// Typing the same words into them has to answer the same, so both go
+    /// through the one filter.
+    #[test]
+    fn both_project_lists_share_one_filter() {
+        let html = include_str!("../web/index.html");
+        assert!(html.contains("function filterProjects("), "filterProjects is the shared rule");
+        let uses = html.matches("filterProjects(S.projects").count();
+        assert_eq!(uses, 2, "expected the scope menu and the projects tab to call it, found {uses}");
+    }
+
+    /// "/" is a character before it is a shortcut. Without the guard it is
+    /// swallowed on its way into a log filter, a SQL box or an env value.
+    #[test]
+    fn the_search_shortcut_leaves_typing_alone() {
+        let html = include_str!("../web/index.html");
+        let at = html.find("const typing =").expect("the typing guard");
+        let guard = &html[at..at + 200];
+        for token in ["INPUT", "TEXTAREA", "isContentEditable"] {
+            assert!(guard.contains(token), "the shortcut no longer checks for {token}");
+        }
+        assert!(
+            html.contains(r#"ev.key === "/" && !typing"#),
+            "\"/\" must only reach the search when nothing is being typed into"
+        );
+    }
 }
 
 #[cfg(test)]

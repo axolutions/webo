@@ -120,6 +120,17 @@
   .scope-row .right { font-size: 11.5px; color: var(--text-3); flex: none; }
   .scope-head { padding: 12px 14px; border-bottom: 1px solid var(--stroke); font-weight: 600; }
   .scope-label { padding: 9px 14px 5px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); }
+  .scope-search { padding: 10px 12px 4px; }
+  .scope-search .search-box { height: 34px; }
+  /* the list scrolls, the search field and the "+ new project" row do not:
+     on a phone the menu is as tall as the viewport allows and the field has
+     to stay reachable however many projects there are. */
+  .scope-list { max-height: min(46vh, 340px); overflow-y: auto; overscroll-behavior: contain; }
+  .scope-empty { padding: 16px 14px 18px; font-size: 12.5px; color: var(--text-3); }
+  .scope-kbd {
+    flex: none; font: 600 10.5px var(--mono); color: var(--text-3);
+    border: 1px solid var(--stroke); border-radius: 6px; padding: 1px 5px;
+  }
   .scope-new { padding: 12px 14px; border-top: 1px solid var(--stroke); font-weight: 600; color: var(--accent); cursor: pointer; font-size: 13.5px; }
   .scope-new:hover { background: var(--surface); }
   .chips { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
@@ -294,6 +305,9 @@
   .proc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--stroke); font-size: 12px; color: var(--text-3); flex-wrap: wrap; }
 
   /* ---------- project cards ---------- */
+  .pj-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .pj-bar .search-box { flex: 1 1 220px; max-width: 340px; }
+  .pj-bar .sub { margin-left: auto; flex: none; }
   .proj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 16px; }
   .proj-card {
     display: flex; flex-direction: column; gap: 13px; padding: 20px; border-radius: 16px;
@@ -510,6 +524,14 @@
     .scope-btn { max-width: calc(100vw - 160px); overflow: hidden; }
     /* the trigger sits mid-header: on a phone the menu takes the viewport width */
     .scope-menu { position: fixed; left: 14px; right: 14px; width: auto; top: 64px; }
+    /* the search field is pinned, so the list gets whatever is left of the
+       screen minus the header, the field and the "+ new project" row */
+    .scope-list { max-height: calc(100vh - 250px); }
+    /* a phone has no key to press */
+    .scope-kbd { display: none; }
+    /* the field goes on its own line so the count and the button keep theirs */
+    .pj-bar { flex-wrap: wrap; }
+    .pj-bar .search-box { order: -1; flex-basis: 100%; max-width: none; }
     /* resources: identity on top, stats below, chart last — nothing side-scrolls */
     .res-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; }
     .res-grid > .res-id { grid-column: 1 / -1; }
@@ -600,6 +622,10 @@
       authFail: (m) => `Could not authorize: ${m}`, authNoCode: "This link has no code in it.",
       authWait: "Authorizing…",
       scopeServer: "Server", scopeProjects: "Projects", scopeNew: "+ new project",
+      searchProjects: "name, domain, repo, stack…",
+      searchNoneFor: (q) => `Nothing matches “${q}”.`,
+      searchWhere: "Search looks at the name, the domain, the repository and the stack.",
+      projMatchN: (n, total) => `${n} of ${total} projects`,
       upFor: (d) => `up for ${d}`, down: "offline",
       tabOverview: "Overview", tabProcesses: "Processes", tabProjects: "Projects",
       tabGeneral: "Overview", tabLogs: "Logs", tabDatabase: "Database", tabErrors: "Errors", tabConfig: "Config",
@@ -728,6 +754,10 @@
       authFail: (m) => `Não consegui autorizar: ${m}`, authNoCode: "Este link não tem código.",
       authWait: "Autorizando…",
       scopeServer: "Servidor", scopeProjects: "Projetos", scopeNew: "+ novo projeto",
+      searchProjects: "nome, domínio, repo, stack…",
+      searchNoneFor: (q) => `Nada combina com “${q}”.`,
+      searchWhere: "A busca olha o nome, o domínio, o repositório e a stack.",
+      projMatchN: (n, total) => `${n} de ${total} projetos`,
       upFor: (d) => `no ar há ${d}`, down: "fora do ar",
       tabOverview: "Visão geral", tabProcesses: "Processos", tabProjects: "Projetos",
       tabGeneral: "Visão geral", tabLogs: "Logs", tabDatabase: "Banco", tabErrors: "Erros", tabConfig: "Config",
@@ -1015,6 +1045,7 @@
     projects: [],            // /api/v1/projects cache
     snapshot: null, system: null, docker: null,
     procSort: "cpu", procQuery: "", procOpen: null,
+    scopeQuery: "", projQuery: "",   // project search: menu / projects tab
     detail: null,            // /projects/{slug} cache
     proj7d: null,
     logs: { level: null, container: null, q: "", minutes: 60, limit: 200, live: false, data: null },
@@ -1037,7 +1068,65 @@
   // ---------- scope switcher + tabs + window ----------
   function projectBySlug(slug) { return S.projects.find((p) => p.slug === slug); }
 
-  function renderScope() {
+  // ---------- project search ----------
+  //
+  // People arrive with whatever identifier they happen to be holding: the name
+  // on the card, a hostname copied out of a browser tab or a DNS record, the
+  // repository from a pull request, or just "the Rails one". Matching the name
+  // alone would leave the question this was built for — "which app answers on
+  // garnet-willow-ridge?" — still needing a pass through every project, so the
+  // domain, the repo and the stack are searched too.
+  function projectHaystack(p) {
+    return [p.name, p.slug, p.domain, (p.url || "").replace(/^https?:\/\//, ""), p.repo, p.tech]
+      .filter(Boolean).join(" ").toLowerCase();
+  }
+
+  // Terms are ANDed, so a second word narrows the list instead of widening it.
+  function filterProjects(list, q) {
+    const terms = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return list;
+    return list.filter((p) => {
+      const hay = projectHaystack(p);
+      return terms.every((w) => hay.includes(w));
+    });
+  }
+
+  function scopeRowsHtml() {
+    const list = filterProjects(S.projects, S.scopeQuery);
+    if (!list.length) {
+      return `<div class="scope-empty">${S.projects.length
+        ? `${t("searchNoneFor", esc(S.scopeQuery.trim()))}<br>${t("searchWhere")}`
+        : t("projEmpty")}</div>`;
+    }
+    return list.map((p) => `
+      <div class="scope-row${S.scope === p.slug ? " on" : ""}" data-scope="${esc(p.slug)}" role="menuitem" tabindex="0">
+        <span class="left">${techChip(p.tech, p.slug)}<span class="nm">${esc(p.slug)}</span>
+          <span class="mini-dot" style="background:${p.running ? "var(--ok)" : "var(--text-3)"}"></span></span>
+        <span class="right">${p.open_errors ? `<span style="color:var(--danger)">${t("errOpenN", p.open_errors)}</span>` : (p.running ? t("registered") : t("discovered"))}</span>
+      </div>`).join("");
+  }
+
+  function bindScopeRow(el) {
+    el.addEventListener("click", () => {
+      const v = el.dataset.scope;
+      S.scopeOpen = false;
+      if (v === "__new") { S.scope = "server"; S.tab = "wizard"; startWizard(); }
+      else if (v === "server") { S.scope = "server"; if (["general", "logs", "db", "errors", "config"].includes(S.tab)) S.tab = "overview"; }
+      else { enterProject(v); return; }
+      render();
+    });
+  }
+
+  // Only the list is redrawn while typing: rewriting the whole menu would take
+  // the field being typed into with it.
+  function drawScopeRows() {
+    const list = $("scope-list");
+    if (!list) return;
+    list.innerHTML = scopeRowsHtml();
+    list.querySelectorAll("[data-scope]").forEach(bindScopeRow);
+  }
+
+  function renderScope(opts = {}) {
     const btn = $("scope-btn");
     if (S.scope === "server") {
       btn.innerHTML = `<span class="tech-chip" style="width:22px;height:22px;background:var(--accent-soft);color:var(--accent);font-size:12px">⌘</span>${esc(t("scopeServer"))}<span class="mini-dot" style="background:var(--accent)"></span><span class="scope-caret">▾</span>`;
@@ -1047,35 +1136,59 @@
     }
     const menu = $("scope-menu");
     menu.hidden = !S.scopeOpen;
-    if (!S.scopeOpen) return;
-    const rows = S.projects.map((p) => `
-      <div class="scope-row${S.scope === p.slug ? " on" : ""}" data-scope="${esc(p.slug)}" role="menuitem" tabindex="0">
-        <span class="left">${techChip(p.tech, p.slug)}<span class="nm">${esc(p.slug)}</span>
-          <span class="mini-dot" style="background:${p.running ? "var(--ok)" : "var(--text-3)"}"></span></span>
-        <span class="right">${p.open_errors ? `<span style="color:var(--danger)">${t("errOpenN", p.open_errors)}</span>` : (p.running ? t("registered") : t("discovered"))}</span>
-      </div>`).join("");
+    // a closed menu forgets what was typed: reopening it should show everything
+    if (!S.scopeOpen) { S.scopeQuery = ""; return; }
     menu.innerHTML = `
       <div class="scope-row scope-head" data-scope="server" role="menuitem" tabindex="0">
         <span class="left">${t("scopeServer")} <span class="sub" style="font-weight:400">${esc(S.system?.hostname || "")}</span></span>
         <span class="right">${S.scope === "server" ? "✓" : ""}</span>
       </div>
       <div class="scope-label">${t("scopeProjects")}</div>
-      ${rows}
+      <div class="scope-search">
+        <div class="search-box">${SEARCH_SVG}<input id="scope-q" placeholder="${esc(t("searchProjects"))}"
+          value="${esc(S.scopeQuery)}" autocomplete="off" autocapitalize="off" spellcheck="false"><span class="scope-kbd">/</span></div>
+      </div>
+      <div class="scope-list" id="scope-list"></div>
       <div class="scope-new" data-scope="__new" role="menuitem" tabindex="0">${t("scopeNew")}</div>`;
-    menu.querySelectorAll("[data-scope]").forEach((el) => {
-      el.addEventListener("click", () => {
-        const v = el.dataset.scope;
-        S.scopeOpen = false;
-        if (v === "__new") { S.scope = "server"; S.tab = "wizard"; startWizard(); }
-        else if (v === "server") { S.scope = "server"; if (["general", "logs", "db", "errors", "config"].includes(S.tab)) S.tab = "overview"; }
-        else { enterProject(v); return; }
-        render();
-      });
+    drawScopeRows();
+    [menu.querySelector(".scope-head"), menu.querySelector(".scope-new")].forEach(bindScopeRow);
+    const q = $("scope-q");
+    q.addEventListener("input", () => { S.scopeQuery = q.value; drawScopeRows(); });
+    q.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") {
+        ev.stopPropagation();
+        if (S.scopeQuery) { S.scopeQuery = ""; q.value = ""; drawScopeRows(); return; }
+        S.scopeOpen = false; renderScope(); $("scope-btn").focus();
+      } else if (ev.key === "Enter") {
+        // one match left and Enter takes it — the whole point of typing
+        const first = $("scope-list").querySelector(".scope-row");
+        if (first) first.click();
+      }
     });
+    // On a phone the keyboard would cover the list it is meant to filter, so
+    // the field is focused only on a pointer-sized screen or when the shortcut
+    // asked for it.
+    if (opts.focusSearch || matchMedia("(min-width: 641px)").matches) { q.focus(); q.select(); }
   }
   $("scope-btn").addEventListener("click", (ev) => { ev.stopPropagation(); S.scopeOpen = !S.scopeOpen; renderScope(); });
   document.addEventListener("click", (ev) => {
     if (S.scopeOpen && !ev.target.closest(".scope-host")) { S.scopeOpen = false; renderScope(); }
+  });
+
+  // "/" and ⌘K (ctrl+K elsewhere) jump to the project search. "/" is a
+  // character, so it only counts when nothing is being typed into — otherwise
+  // the shortcut would eat it out of a log filter or an env value.
+  document.addEventListener("keydown", (ev) => {
+    const el = ev.target;
+    const typing = !!el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable);
+    const combo = (ev.metaKey || ev.ctrlKey) && (ev.key === "k" || ev.key === "K");
+    const slash = ev.key === "/" && !typing && !ev.metaKey && !ev.ctrlKey && !ev.altKey;
+    if (!combo && !slash) return;
+    ev.preventDefault();
+    const inTab = $("pj-q");
+    if (inTab) { inTab.focus(); inTab.select(); return; }
+    S.scopeOpen = true;
+    renderScope({ focusSearch: true });
   });
 
   function renderTabs() {
@@ -1316,17 +1429,27 @@
   async function viewProjects() {
     const app = $("app");
     app.innerHTML = `
-      <div class="row-between" style="margin-bottom:14px">
+      <div class="pj-bar">
+        <div class="search-box">${SEARCH_SVG}<input id="pj-q" placeholder="${esc(t("searchProjects"))}"
+          value="${esc(S.projQuery)}" autocomplete="off" autocapitalize="off" spellcheck="false"><span class="scope-kbd">/</span></div>
         <span class="sub" id="pj-count"></span>
         <button class="btn-primary" id="pj-new">${t("newProject")}</button>
       </div>
       <div class="proj-grid" id="pj-grid"></div>`;
     $("pj-new").addEventListener("click", () => { S.tab = "wizard"; startWizard(); render(); });
-    const draw = async () => {
-      await loadProjects();
+    $("pj-q").addEventListener("input", () => { S.projQuery = $("pj-q").value; drawCards(); });
+    $("pj-q").addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape" || !S.projQuery) return;
+      S.projQuery = ""; $("pj-q").value = ""; drawCards();
+    });
+    // the poll refreshes the data; typing only redraws the cards
+    const drawCards = () => {
       if (S.tab !== "projects" || S.scope !== "server") return;
-      $("pj-count").textContent = `${S.projects.length} ${t("projectsN")}`;
-      $("pj-grid").innerHTML = S.projects.map((p) => {
+      const list = filterProjects(S.projects, S.projQuery);
+      $("pj-count").textContent = list.length === S.projects.length
+        ? `${S.projects.length} ${t("projectsN")}`
+        : t("projMatchN", list.length, S.projects.length);
+      $("pj-grid").innerHTML = list.map((p) => {
         const st = p.status ? t(p.status) : (p.running ? t("registered") : t("discovered"));
         const spark = p.history ? sparkSvg(seriesOf(p.history, "cpu_pct"), { h: 30, max: Math.max(...p.history.map((h) => h.cpu_pct), 4) }) : "";
         const deploy = p.last_build
@@ -1354,9 +1477,15 @@
             ${p.open_errors ? `<span class="err-badge">${t("errOpenN", p.open_errors)}</span>` : `<span class="sub">${t("noErrors")}</span>`}
           </div>
         </div>`;
-      }).join("") || `<div class="empty-note" style="grid-column:1/-1">${t("projEmpty")}</div>`;
+      }).join("") || `<div class="empty-note" style="grid-column:1/-1">${S.projects.length
+        ? `${t("searchNoneFor", esc(S.projQuery.trim()))} ${t("searchWhere")}`
+        : t("projEmpty")}</div>`;
       $("pj-grid").querySelectorAll(".proj-card").forEach((c) =>
         c.addEventListener("click", () => enterProject(c.dataset.slug)));
+    };
+    const draw = async () => {
+      await loadProjects();
+      drawCards();
     };
     await draw();
     every(draw, 15000);

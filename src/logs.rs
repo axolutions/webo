@@ -27,27 +27,77 @@ pub fn parse_line(raw: &str) -> Option<(i64, String)> {
     Some((ts, rest.to_string()))
 }
 
-/// Pairs each error line with the stack frames that follow it, so the stored
-/// occurrence carries the whole story — the panel shows a real stack trace,
-/// not a lonely first line.
+/// Pairs each error line with the lines that belong to it, so the stored
+/// occurrence carries the whole story — a real stack trace, and the rest of
+/// the message when the error spans several lines.
+///
+/// Two things were wrong before. Only stack frames counted as continuation,
+/// so a multi-line message split; and a line that had already been absorbed
+/// still opened an issue of its own on the next turn of the loop. Together
+/// they turned one Clerk error into three issues and one npm failure into
+/// five — the open-error count measured how chatty the logger was, not how
+/// many things were broken.
 pub fn error_blocks(lines: &[crate::store::LogLine]) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    for (i, l) in lines.iter().enumerate() {
+    let mut i = 0;
+    while i < lines.len() {
+        let l = &lines[i];
         if !crate::errors::looks_like_error(&l.line, &l.stream) {
+            i += 1;
             continue;
         }
         let mut message = l.line.clone();
-        for follow in lines.iter().skip(i + 1).take(12) {
-            if follow.container == l.container && crate::errors::is_stack_frame(&follow.line) {
-                message.push('\n');
-                message.push_str(&follow.line);
-            } else {
+        let mut j = i + 1;
+        while j < lines.len() && j - i <= 20 {
+            let f = &lines[j];
+            if f.container != l.container || !continues(l, f) {
                 break;
             }
+            message.push('\n');
+            message.push_str(&f.line);
+            j += 1;
         }
         out.push((i, message));
+        // whatever was folded in does not get to be an issue of its own
+        i = j.max(i + 1);
     }
     out
+}
+
+/// Does `f` belong to the error that started at `head`?
+///
+/// A stack frame always does. Otherwise the line has to be part of the same
+/// burst — same stream, same second — and not look like the start of a new
+/// record. That last condition is what keeps the next request from being
+/// swallowed: anything carrying its own level or timestamp opens its own
+/// story.
+fn continues(head: &crate::store::LogLine, f: &crate::store::LogLine) -> bool {
+    if crate::errors::is_stack_frame(&f.line) {
+        return true;
+    }
+    // Prose only folds in when it came out in the same breath: same stream,
+    // same second. A looser window swallowed the next ordinary line, which is
+    // the opposite mistake and a worse one — an error that eats the output
+    // after it hides what really happened.
+    if f.stream != head.stream || f.ts != head.ts {
+        return false;
+    }
+    // indented text, and loggers that prefix every line of one failure
+    let indented = f.line.starts_with(' ') || f.line.starts_with('\t');
+    let same_label = shared_label(&head.line).is_some_and(|p| f.line.starts_with(p));
+    indented || same_label || !crate::errors::starts_record(&f.line)
+}
+
+/// `npm error path /app` → `npm error `: the tag a logger repeats on every
+/// line of the same failure.
+fn shared_label(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    for tag in ["npm error ", "npm err! ", "yarn error ", "pnpm error "] {
+        if lower.starts_with(tag) {
+            return Some(&line[..tag.len()]);
+        }
+    }
+    None
 }
 
 /// Lines newer than `since`, so a re-read never stores the same line twice.
@@ -213,6 +263,51 @@ mod tests {
         assert_eq!(fresh.len(), 1, "the line at the boundary was already stored");
         assert_eq!(fresh[0].2, "new");
         assert_eq!(newer_than(lines, None).len(), 3, "a first read takes everything");
+    }
+
+    /// The three shapes that used to split one failure into several issues,
+    /// taken from the logs of real projects on the server.
+    #[test]
+    fn a_multi_line_failure_is_one_issue() {
+        let mk = |ts: i64, c: &str, line: &str| crate::store::LogLine {
+            ts, container: c.into(), stream: "stderr".into(), line: line.into(),
+        };
+
+        // Clerk: the help prose at the end used to become its own issue
+        let clerk = vec![
+            mk(10, "investos", "⨯ Error: Clerk: auth() was called but Clerk can't detect usage of clerkMiddleware(). Please ensure the following:"),
+            mk(10, "investos", "- Your middleware file exists at ./middleware.(ts|js)"),
+            mk(10, "investos", "If you've verified your configuration and are still seeing this error, there may be a runtime issue."),
+            mk(10, "investos", "    at async l (.next/server/app/api/carteira/route.js:1:7545)"),
+        ];
+        let blocks = error_blocks(&clerk);
+        assert_eq!(blocks.len(), 1, "one error, one issue");
+        assert!(blocks[0].1.contains("still seeing this error"), "the prose belongs to it");
+        assert!(blocks[0].1.contains("carteira/route.js"), "and so does the frame that blames the file");
+
+        // npm: every line carries the same tag, so every line became an issue
+        let npm = vec![
+            mk(20, "ferraro", "npm error path /app"),
+            mk(20, "ferraro", "npm error command failed"),
+            mk(20, "ferraro", "npm error signal SIGTERM"),
+            mk(20, "ferraro", "npm error command sh -c next start"),
+        ];
+        assert_eq!(error_blocks(&npm).len(), 1, "one SIGTERM, not four");
+
+        // Postgres: the detail line is part of the exception above it
+        let pg = vec![
+            mk(30, "db", "ERROR:  column \"coluna_inexistente\" does not exist"),
+            mk(30, "db", "ERROR:  column \"coluna_inexistente\" does not exist at character 38"),
+        ];
+        assert_eq!(error_blocks(&pg).len(), 1);
+
+        // what must NOT fold in: the next second, the next container, the
+        // next stream — anything that is a story of its own
+        let apart = vec![
+            mk(40, "app", "Error: boom"),
+            mk(41, "app", "Error: a different boom one second later"),
+        ];
+        assert_eq!(error_blocks(&apart).len(), 2, "a later burst is a different failure");
     }
 
     #[test]

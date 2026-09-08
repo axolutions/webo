@@ -55,6 +55,25 @@ pub fn strip_log_prefix(line: &str) -> (Option<&'static str>, &str) {
             return (Some(level), msg);
         }
     }
+    // zerolog and most of the Go ecosystem (cloudflared included) write a
+    // three-letter token right after an RFC3339 timestamp:
+    // "2026-09-02T05:10:27Z WRN failed to serve tunnel connection".
+    // Without this, WRN never matched "warn" and an ERR line with no marker
+    // word in it was filed as info — an error hidden in plain sight.
+    if let Some((stamp, rest)) = t.split_once(' ') {
+        if looks_like_rfc3339(stamp) {
+            let (token, msg) = rest.split_once(' ').unwrap_or((rest, ""));
+            let level = match token {
+                "ERR" | "FTL" | "PNC" => Some("error"),
+                "WRN" => Some("warn"),
+                "INF" | "DBG" | "TRC" => Some("info"),
+                _ => None,
+            };
+            if let Some(level) = level {
+                return (Some(level), msg.trim_start());
+            }
+        }
+    }
     // nginx, kong, and most C daemons: "2026/09/02 19:37:04 [info] 29#0: message".
     // The bracketed word is the level, and it is authoritative — an [info] line
     // saying "recv() failed" is a client disconnecting, not an error.
@@ -74,6 +93,18 @@ pub fn strip_log_prefix(line: &str) -> (Option<&'static str>, &str) {
         }
     }
     (None, line)
+}
+
+/// `2026-09-02T05:10:27Z` and friends — enough to tell a timestamp from a
+/// word, which is all the level detection above needs.
+fn looks_like_rfc3339(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() >= 20
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
 }
 
 /// Is there a message here, or only punctuation and whitespace?
@@ -109,6 +140,23 @@ pub fn level_of(line: &str, stream: &str) -> &'static str {
     } else {
         "info"
     }
+}
+
+/// Does this line open a record of its own? A line that states its level or
+/// stamps its own time is a new entry; prose that does neither is the tail of
+/// whatever came before it.
+pub fn starts_record(line: &str) -> bool {
+    if strip_log_prefix(line).0.is_some() {
+        return true;
+    }
+    let t = line.trim_start();
+    if t.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let first = t.split_whitespace().next().unwrap_or("");
+    looks_like_rfc3339(first)
+        // 2026/09/02 19:37:04 — nginx and friends
+        || (first.len() == 10 && first.as_bytes()[4] == b'/' && first[..4].bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Does this line belong to the stack of the error above it?
@@ -163,11 +211,32 @@ pub fn looks_like_error(line: &str, stream: &str) -> bool {
     if trimmed.starts_with("at ") || trimmed.starts_with("File \"") {
         return false;
     }
-    if MARKERS.iter().any(|m| lower.contains(m)) {
+    if has_marker_word(&lower) {
         return true;
     }
     // stderr alone is not enough: plenty of tools log status to stderr
     stream == "stderr" && lower.contains("failed")
+}
+
+/// A marker only counts as its own word, and never inside something that
+/// looks like a URL or a path. `GET /api/error-handler 200` is a successful
+/// request, not an error — and any app with an `/errors` route would have
+/// reported one per hit.
+fn has_marker_word(lower: &str) -> bool {
+    lower
+        .split(|c: char| c.is_whitespace())
+        .filter(|tok| !tok.contains('/') && !tok.contains('?'))
+        .any(|tok| {
+            let word = tok.trim_matches(|c: char| !c.is_alphanumeric());
+            MARKERS.iter().any(|m| {
+                let m = m.trim_end_matches([':', '!']);
+                // The marker has to be the word, or the tail of it —
+                // TypeError, ReferenceError and SyntaxError are how half the
+                // JS world names an error, and dropping them would be worse
+                // than the false positive this whole rule exists to kill.
+                word == m || word.ends_with(m) || word.strip_suffix('s') == Some(m)
+            })
+        })
 }
 
 /// Normalizes a message so two occurrences of the same bug land on the same
@@ -175,16 +244,36 @@ pub fn looks_like_error(line: &str, stream: &str) -> bool {
 pub fn fingerprint(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
     let mut chars = message.chars().peekable();
-    let mut in_quote = false;
     while let Some(c) = chars.next() {
         match c {
+            // Quoted text is where two opposite truths meet. In
+            // `refused for user "leads"` the quotes hold an identifier and
+            // two users are one bug; in `error="context canceled"` they hold
+            // the cause, and a timeout is not a clean shutdown. Throwing the
+            // content away merged the second pair; keeping it split the first.
+            //
+            // The tell is shape, not position: an identifier is one token, a
+            // cause is a phrase. One word collapses to <str>; several words
+            // are kept and normalized like the rest of the line.
             '"' | '\'' => {
-                if !in_quote {
+                let quote = c;
+                let mut inner = String::new();
+                for n in chars.by_ref() {
+                    if n == quote {
+                        break;
+                    }
+                    inner.push(n);
+                }
+                if inner.trim().contains(char::is_whitespace) {
+                    if !out.ends_with(' ') && !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(&fingerprint(&inner));
+                    out.push(' ');
+                } else {
                     out.push_str("<str>");
                 }
-                in_quote = !in_quote;
             }
-            _ if in_quote => {}
             '/' => {
                 // collapse a path into a single placeholder
                 while chars.peek().is_some_and(|n| !n.is_whitespace()) {
@@ -291,6 +380,46 @@ mod tests {
         // a stack frame belongs to the error above it
         assert!(!looks_like_error("    at Object.<anonymous> (/app/lib/db.ts:12:9)", "stderr"));
         assert!(!looks_like_error("  File \"/app/main.py\", line 3", "stderr"));
+    }
+
+    /// Real lines from the server, from the cards this fixes.
+    #[test]
+    fn levels_the_go_ecosystem_declares_are_believed() {
+        // cloudflared and everything else built on zerolog
+        assert_eq!(level_of("2026-09-02T05:10:27Z WRN failed to serve tunnel connection", "stderr"), "warn");
+        assert_eq!(level_of("2026-09-02T05:10:27Z INF Registered tunnel connection connIndex=2", "stderr"), "info");
+        // the grave one: an error with no marker word in it, filed as info
+        assert_eq!(level_of("2026-08-30T11:50:18Z ERR Connection terminated connIndex=2", "stderr"), "error");
+        assert!(looks_like_error("2026-08-30T11:50:18Z ERR Connection terminated connIndex=2", "stderr"));
+        assert!(!looks_like_error("2026-09-02T05:10:27Z WRN failed to serve tunnel connection", "stderr"));
+        // a word that merely starts like a timestamp is not one
+        assert_eq!(strip_log_prefix("2026-09 WRN nope").0, None);
+    }
+
+    #[test]
+    fn a_marker_inside_a_path_is_not_an_error() {
+        // a successful request to a route that happens to be named for errors
+        assert!(!looks_like_error("GET /api/error-handler 200 in 5ms", "stdout"));
+        assert!(!looks_like_error("compiled /errors in 120ms", "stdout"));
+        assert_eq!(level_of("GET /api/error-handler 200 in 5ms", "stdout"), "info");
+        // and the ways an error really announces itself still count
+        assert!(looks_like_error("TypeError: Cannot read properties of null", "stderr"));
+        assert!(looks_like_error("ERROR:  syntax error at or near \"1\"", "stderr"));
+        assert!(looks_like_error("panic: runtime error: index out of range", "stderr"));
+        assert!(looks_like_error("Unhandled exception in worker", "stderr"));
+    }
+
+    #[test]
+    fn a_quoted_cause_splits_an_issue_but_a_quoted_name_does_not() {
+        // the cloudflared case: two different failures, one issue
+        let timeout = fingerprint("failed to run the datagram handler error=\"timeout: no recent network activity\" connIndex=2");
+        let canceled = fingerprint("failed to run the datagram handler error=\"context canceled\" connIndex=2");
+        assert_ne!(timeout, canceled, "a timeout is not a clean shutdown");
+
+        // and the opposite case still holds: an identifier is not a cause
+        let a = fingerprint("ERROR: connection to 10.0.0.7:5432 refused for user \"leads\"");
+        let b = fingerprint("ERROR: connection to 192.168.1.22:5432 refused for user \"admin\"");
+        assert_eq!(a, b, "two users, one bug");
     }
 
     #[test]

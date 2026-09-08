@@ -676,8 +676,13 @@ async fn server_processes(api: &Api, params: &Value) -> String {
             None => "The collector has not scanned processes yet.".into(),
         };
     }
-    let cpu_sum: f32 = st.processes.iter().map(|p| p.cpu_pct).sum();
-    let mem_sum: u64 = st.processes.iter().map(|p| p.mem_bytes).sum();
+    // "Host totals" used to be the sum of the rows below, which is not the
+    // host: per-process CPU is a share of ONE core, so on 12 threads it read
+    // 20% while the machine was at 1.2% — and the same panel's server_health
+    // said 0.9%. Summed RSS double-counts shared pages the same way. The
+    // machine's own numbers answer the question the label asks.
+    let host_cpu = st.snapshot.cpu_pct;
+    let host_mem = st.snapshot.mem_used;
     let rows: Vec<String> = list
         .iter()
         .take(limit)
@@ -696,13 +701,16 @@ async fn server_processes(api: &Api, params: &Value) -> String {
             )
         })
         .collect();
+    // `groups` is what the machine has, not what survived the cut, so a
+    // reader can tell there is more than the screen shows
+    let groups = st.process_groups_total.max(total_shown);
     format!(
-        "{shown} of {groups} process groups, sorted by {sort}. Host totals: cpu {cpu_sum}, ram {mem_sum}.\n\n{rows}",
+        "{shown} of {groups} process groups, sorted by {sort}. Host: cpu {cpu}, ram {mem} used.\n\n{rows}",
         shown = rows.len(),
-        groups = total_shown,
+        groups = groups,
         sort = sort_by,
-        cpu_sum = fmt::pct(cpu_sum),
-        mem_sum = fmt::bytes(mem_sum),
+        cpu = fmt::pct(host_cpu),
+        mem = fmt::bytes(host_mem),
         rows = rows.join("\n"),
     )
 }
@@ -2069,7 +2077,15 @@ mod tests {
         let text = tool_text(api.clone(), "server_processes", json!({})).await;
         assert!(text.contains("codo"), "{text}");
         assert!(text.contains("sorted by cpu"), "{text}");
-        assert!(text.contains("Host totals"), "{text}");
+        // the header reports the machine, not the sum of the rows: summing
+        // per-core percentages said 20% on a host idling at 1.2%
+        assert!(text.contains("Host: cpu"), "{text}");
+        let st = api.state.read().await;
+        assert!(
+            text.contains(&crate::fmt::pct(st.snapshot.cpu_pct)),
+            "the header has to be the machine's own number: {text}"
+        );
+        drop(st);
 
         let filtered =
             tool_text(api, "server_processes", json!({ "filter": "nothing-matches-this" })).await;

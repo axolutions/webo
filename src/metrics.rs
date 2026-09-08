@@ -142,6 +142,9 @@ pub struct State {
     pub history: VecDeque<Sample>,
     pub history_cap: usize,
     pub processes: Vec<ProcessGroup>,
+    /// How many process groups the machine has, before the list was cut to
+    /// what fits on a screen.
+    pub process_groups_total: usize,
     pub docker: DockerInfo,
     pub projects_live: std::collections::HashMap<String, ProjectLive>,
 }
@@ -154,6 +157,7 @@ impl State {
             history: VecDeque::with_capacity(history_cap),
             history_cap,
             processes: Vec::new(),
+            process_groups_total: 0,
             docker: DockerInfo::default(),
             projects_live: std::collections::HashMap::new(),
         }

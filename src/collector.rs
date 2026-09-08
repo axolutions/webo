@@ -301,7 +301,7 @@ fn scan_procs(prev: &mut HashMap<u32, ProcSample>, sample_secs: u64) -> Vec<RawP
 /// Groups an app with its subprocess tree: a process joins its parent's group
 /// while the parent runs the same executable or has the same comm — the way
 /// browsers spawn content processes and postgres spawns workers.
-fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
+fn group_processes(raw: Vec<RawProc>) -> (Vec<ProcessGroup>, usize) {
     let by_pid: HashMap<u32, usize> = raw.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
 
     let root_of = |start: usize| -> usize {
@@ -366,27 +366,58 @@ fn group_processes(raw: Vec<RawProc>) -> Vec<ProcessGroup> {
     }
 
     list.sort_by(|a, b| b.cpu_pct.total_cmp(&a.cpu_pct).then(b.mem_bytes.cmp(&a.mem_bytes)));
+    // How many groups exist, counted before the cut — otherwise the screen
+    // says "40 of 40" on a machine with 400 tasks and there is no way to tell
+    // from the outside that anything was left out.
+    let found = list.len();
     list.truncate(40);
-    list
+    (list, found)
 }
 
+/// Space actually taken by files, and the size of the filesystem.
+///
+/// `total - available` counts the blocks ext4 reserves for root — about 5%,
+/// which on a 1 TB disk is 51 GB of nothing reported as data. `df` shows the
+/// real figure and so does statvfs; `available` stays the right answer for
+/// "free", because that is what a normal user can still write.
 fn root_disk(disks: &mut Disks) -> (u64, u64) {
     disks.refresh(true);
-    // largest filesystem mounted at "/" (in a container, overlayfs reflects the host disk)
     let mut best = (0u64, 0u64);
     for d in disks.iter() {
         if d.mount_point() == Path::new("/") && d.total_space() > best.1 {
-            best = (d.total_space() - d.available_space(), d.total_space());
+            best = (used_of(d), d.total_space());
         }
     }
     if best.1 == 0 {
         for d in disks.iter() {
             if d.total_space() > best.1 {
-                best = (d.total_space() - d.available_space(), d.total_space());
+                best = (used_of(d), d.total_space());
             }
         }
     }
     best
+}
+
+/// Bytes in use on a filesystem. Prefers statvfs, which distinguishes free
+/// from available; falls back to the old estimate where it is unavailable.
+fn used_of(d: &sysinfo::Disk) -> u64 {
+    statvfs_used(d.mount_point()).unwrap_or_else(|| d.total_space() - d.available_space())
+}
+
+#[cfg(unix)]
+fn statvfs_used(mount: &Path) -> Option<u64> {
+    // Read from the shell rather than binding libc: one process every sample
+    // interval is cheap, and df is the same number a person would check.
+    let out = std::process::Command::new("df").args(["-B1", "--output=used"]).arg(mount).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).lines().nth(1)?.trim().parse().ok()
+}
+
+#[cfg(not(unix))]
+fn statvfs_used(_mount: &Path) -> Option<u64> {
+    None
 }
 
 pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
@@ -439,7 +470,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
         let (disk_used, disk_total) = root_disk(&mut disks);
         let (battery_pct, battery_limit_pct, battery_status) =
             read_battery(Path::new("/sys/class/power_supply"));
-        let procs = group_processes(scan_procs(&mut proc_prev, sample_secs));
+        let (procs, groups_total) = group_processes(scan_procs(&mut proc_prev, sample_secs));
 
         let snap = Snapshot {
             ts: now_ts(),
@@ -466,6 +497,7 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
 
         let mut st = state.write().await;
         st.processes = procs;
+        st.process_groups_total = groups_total;
         st.push(snap);
     }
 }
@@ -604,7 +636,7 @@ Inter-|   Receive                                                |  Transmit
             raw(10, 1, "postgres", "/bin/postgres", 0.2, 100),
             raw(11, 10, "postgres", "/bin/postgres", 0.1, 40),
         ];
-        let groups = group_processes(raws);
+        let (groups, _groups_total) = group_processes(raws);
         assert_eq!(groups[0].threads, 4, "2 threads per proc, summed");
         assert_eq!(groups[0].children[0].threads, 2);
     }
@@ -627,7 +659,7 @@ Inter-|   Receive                                                |  Transmit
             raw(103, 101, "Isolated Web Co", ff, 0.5, 200),
             raw(200, 1, "gnome-shell", "/usr/bin/gnome-shell", 0.4, 300),
         ];
-        let groups = group_processes(raws);
+        let (groups, _groups_total) = group_processes(raws);
         assert_eq!(groups.len(), 2);
         let firefox = groups.iter().find(|g| g.name == "firefox").unwrap();
         assert_eq!(firefox.procs, 4);
@@ -646,7 +678,7 @@ Inter-|   Receive                                                |  Transmit
             raw(11, 10, "postgres", "postgres:", 0.1, 40),
             raw(12, 10, "postgres", "postgres:", 0.3, 60),
         ];
-        let groups = group_processes(raws);
+        let (groups, _groups_total) = group_processes(raws);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].procs, 3);
         assert_eq!(groups[0].kind, "postgres");
@@ -659,7 +691,7 @@ Inter-|   Receive                                                |  Transmit
             raw(20, 1, "webo", "/usr/local/bin/webo", 0.2, 30),
             raw(21, 1, "codo", "/usr/local/bin/codo", 0.3, 40),
         ];
-        let groups = group_processes(raws);
+        let (groups, _groups_total) = group_processes(raws);
         assert_eq!(groups.len(), 3);
     }
 
@@ -669,7 +701,7 @@ Inter-|   Receive                                                |  Transmit
             .map(|i| raw(1000 + i, 1, &format!("p{i}"), &format!("/bin/p{i}"), i as f32 / 10.0, 1))
             .collect();
         raws.push(raw(5000, 1, "hot", "/bin/hot", 99.0, 1));
-        let groups = group_processes(raws);
+        let (groups, _groups_total) = group_processes(raws);
         assert_eq!(groups.len(), 40);
         assert_eq!(groups[0].name, "hot");
     }

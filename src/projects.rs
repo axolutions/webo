@@ -428,6 +428,23 @@ fn dir_size(path: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    /// A bind mount weighs what its directory weighs — the number `docker df`
+    /// cannot give, because it only knows named volumes.
+    #[test]
+    fn a_bound_directory_is_measured_on_the_host() {
+        let base = std::env::temp_dir().join(format!("webo-dirsize-{}", std::process::id()));
+        let nested = base.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(base.join("one"), vec![0u8; 1000]).unwrap();
+        std::fs::write(nested.join("two"), vec![0u8; 2345]).unwrap();
+
+        assert_eq!(super::dir_size(base.to_str().unwrap()), Some(3345), "files at every depth count");
+        assert_eq!(super::dir_size("/definitely/not/here"), None);
+        // a file is not a directory to walk
+        assert_eq!(super::dir_size(base.join("one").to_str().unwrap()), None);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     use super::*;
 
     #[test]

@@ -504,6 +504,28 @@ pub async fn run(state: Arc<RwLock<State>>, sample_secs: u64) {
 
 #[cfg(test)]
 mod tests {
+    /// Disk "used" must be what files take, not total minus available —
+    /// the gap is the reserve ext4 keeps for root, 51 GB on this server.
+    #[test]
+    fn disk_used_excludes_the_filesystems_reserve() {
+        match super::statvfs_used(std::path::Path::new("/")) {
+            // where df speaks GNU (Linux, which is where webo runs)
+            Some(used) => {
+                assert!(used > 0, "a mounted filesystem has something on it");
+                let mut disks = sysinfo::Disks::new_with_refreshed_list();
+                let (reported, total) = super::root_disk(&mut disks);
+                assert!(reported <= total, "used cannot exceed the disk");
+                assert!(total > 0);
+            }
+            // elsewhere the estimate stands in, and must still be sane
+            None => {
+                let mut disks = sysinfo::Disks::new_with_refreshed_list();
+                let (used, total) = super::root_disk(&mut disks);
+                assert!(used <= total);
+            }
+        }
+    }
+
     use super::*;
 
     fn raw(pid: u32, ppid: u32, comm: &str, bin: &str, cpu: f32, mem: u64) -> RawProc {
@@ -519,6 +541,16 @@ mod tests {
             mem_bytes: mem,
             disk_bps: 1,
         }
+    }
+
+    #[test]
+    fn process_groups_are_counted_before_the_list_is_cut() {
+        let raw: Vec<RawProc> = (0..60)
+            .map(|i| raw(i + 1, 1, &format!("proc{i}"), &format!("/usr/bin/proc{i}"), i as f32, 1000))
+            .collect();
+        let (shown, total) = group_processes(raw);
+        assert_eq!(shown.len(), 40, "the screen still gets 40");
+        assert_eq!(total, 60, "and the count is what the machine really has");
     }
 
     #[test]

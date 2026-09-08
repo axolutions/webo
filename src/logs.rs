@@ -100,12 +100,39 @@ fn shared_label(line: &str) -> Option<&str> {
     None
 }
 
-/// Lines newer than `since`, so a re-read never stores the same line twice.
-pub fn newer_than(lines: Vec<(i64, String, String)>, since: Option<i64>) -> Vec<(i64, String, String)> {
-    match since {
-        Some(s) => lines.into_iter().filter(|(ts, _, _)| *ts > s).collect(),
-        None => lines,
+/// Lines a re-read has not stored yet.
+///
+/// The cursor has one-second resolution, so `ts > since` threw away
+/// everything a container wrote after the first line of that second — on a
+/// busy app that is most of it, and it took a real 500 with its stack trace
+/// with it. Now that second is read again and matched against what is already
+/// stored, line by line: repeats are dropped, the rest is new.
+pub fn newer_than(
+    lines: Vec<(i64, String, String)>,
+    since: Option<i64>,
+    already: &[String],
+) -> Vec<(i64, String, String)> {
+    let Some(s) = since else { return lines };
+    // a line can legitimately repeat within a second, so count rather than
+    // just test membership
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for line in already {
+        *seen.entry(line.as_str()).or_insert(0) += 1;
     }
+    lines
+        .into_iter()
+        .filter(|(ts, _, line)| match (*ts).cmp(&s) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => match seen.get_mut(line.as_str()) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            },
+        })
+        .collect()
 }
 
 async fn fetch(docker: &Docker, id: &str, since: Option<i64>) -> Vec<(i64, String, String)> {
@@ -116,7 +143,12 @@ async fn fetch(docker: &Docker, id: &str, since: Option<i64>) -> Vec<(i64, Strin
             stderr: true,
             timestamps: true,
             since: since.unwrap_or(0),
-            tail: if since.is_some() { "all".into() } else { "500".into() },
+            // The first read used to take only the last 500 lines, and there
+            // is no second chance: the cursor only moves forward. Ten hours of
+            // cloudflared — including the credential errors it died on at
+            // boot — were never indexed. The beginning of a container's life
+            // is exactly where the interesting failures are.
+            tail: "all".into(),
             ..Default::default()
         }),
     );
@@ -201,7 +233,11 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     .unwrap_or_else(|| id.chars().take(12).collect());
                 let since = store.last_log_ts(p.id, &name).ok().flatten();
                 let fetched = fetch(&docker, &id, since).await;
-                let fresh = newer_than(fetched, since);
+                let already = match since {
+                    Some(s) => store.lines_at(p.id, &name, s).unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                let fresh = newer_than(fetched, since, &already);
                 if fresh.is_empty() {
                     continue;
                 }
@@ -259,10 +295,31 @@ mod tests {
             (200, "stdout".to_string(), "boundary".to_string()),
             (300, "stderr".to_string(), "new".to_string()),
         ];
-        let fresh = newer_than(lines.clone(), Some(200));
-        assert_eq!(fresh.len(), 1, "the line at the boundary was already stored");
+        // the line at the boundary was already stored, so it is skipped by
+        // identity — not by being at the boundary
+        let fresh = newer_than(lines.clone(), Some(200), &["boundary".to_string()]);
+        assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].2, "new");
-        assert_eq!(newer_than(lines, None).len(), 3, "a first read takes everything");
+        assert_eq!(newer_than(lines.clone(), None, &[]).len(), 3, "a first read takes everything");
+
+        // and this is the bug: a line written in the same second as the
+        // cursor, but not yet stored, must survive
+        let busy = vec![
+            (200, "stdout".to_string(), "already indexed".to_string()),
+            (200, "stdout".to_string(), "written a moment later".to_string()),
+            (200, "stderr".to_string(), "and this one too".to_string()),
+        ];
+        let fresh = newer_than(busy, Some(200), &["already indexed".to_string()]);
+        assert_eq!(fresh.len(), 2, "the rest of that second is not lost");
+        assert_eq!(fresh[0].2, "written a moment later");
+
+        // a line that really does repeat inside one second is kept once per
+        // occurrence, not deduplicated away
+        let twice = vec![
+            (200, "stdout".to_string(), "tick".to_string()),
+            (200, "stdout".to_string(), "tick".to_string()),
+        ];
+        assert_eq!(newer_than(twice, Some(200), &["tick".to_string()]).len(), 1);
     }
 
     /// The three shapes that used to split one failure into several issues,

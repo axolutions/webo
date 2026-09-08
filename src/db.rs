@@ -340,7 +340,9 @@ pub async fn detect_sqlite(slug: &str) -> Option<Database> {
         if c.labels.as_ref().and_then(|l| l.get("webo.role")).is_some_and(|r| r == "database") {
             continue; // our own Postgres
         }
-        for m in c.mounts.unwrap_or_default() {
+        let container_id = c.id.clone();
+        let mounts = c.mounts.clone().unwrap_or_default();
+        for m in mounts {
             let Some(dest) = m.destination.clone() else { continue };
             let source = m.name.clone().or_else(|| m.source.clone());
             let Some(source) = source else { continue };
@@ -382,6 +384,66 @@ pub async fn detect_sqlite(slug: &str) -> Option<Database> {
                     persisted: true,
                     created_at: now_ts(),
                 });
+            }
+        }
+        // Nothing under a mount. The panel promises to warn about a SQLite
+        // sitting in the container's writable layer — the one that a deploy
+        // wipes — but only mounts were ever searched, so that database was
+        // not "not persisted", it was invisible. `docker diff` lists what the
+        // container wrote outside its mounts, which is exactly that case.
+        if let Some(id) = container_id {
+            if let Some(path) = sqlite_in_container_layer(&docker, &id).await {
+                return Some(Database {
+                    kind: "sqlite".into(),
+                    container: Some(id),
+                    db_name: None,
+                    username: None,
+                    password: None,
+                    volume: None,
+                    file_path: Some(path),
+                    persisted: false,
+                    created_at: now_ts(),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// A SQLite file the container wrote into its own layer, if any. Changed
+/// paths come from `docker diff`; the header check confirms it is really a
+/// database and not a name that merely ends in .db.
+async fn sqlite_in_container_layer(docker: &Docker, id: &str) -> Option<String> {
+    let changes = docker.container_changes(id).await.ok()??;
+    let candidates: Vec<String> = changes
+        .into_iter()
+        .map(|c| c.path)
+        .filter(|p| p.ends_with(".db") || p.ends_with(".sqlite") || p.ends_with(".sqlite3"))
+        .take(5)
+        .collect();
+    for path in candidates {
+        let out = docker
+            .create_exec(
+                id,
+                bollard::exec::CreateExecOptions {
+                    cmd: Some(vec!["head".to_string(), "-c".into(), "16".into(), path.clone()]),
+                    attach_stdout: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .ok();
+        let Some(exec) = out else { continue };
+        if let Ok(bollard::exec::StartExecResults::Attached { mut output, .. }) =
+            docker.start_exec(&exec.id, None).await
+        {
+            use futures_util::StreamExt;
+            let mut head = String::new();
+            while let Some(Ok(chunk)) = output.next().await {
+                head.push_str(&chunk.to_string());
+            }
+            if head.contains("SQLite format 3") {
+                return Some(path);
             }
         }
     }

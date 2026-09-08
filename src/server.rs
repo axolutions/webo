@@ -850,7 +850,12 @@ async fn database_tables(AxumState(api): AxumState<Api>, AxumPath(slug): AxumPat
     let sql = if database.kind == "postgres" {
         "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name"
     } else {
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        // `sqlite_%` only hides the autoindexes. A virtual table brings its
+        // own shadow tables (logs_data, logs_idx, …) which are storage, not
+        // data — webo's own database showed 17 tables for 12, and the shadows
+        // were browsable as if they meant something.
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+         AND name NOT IN (SELECT name FROM pragma_table_list WHERE type='shadow') ORDER BY name"
     };
     match run_sql(&api, &slug, sql, false).await {
         Ok(out) => {
@@ -914,7 +919,12 @@ pub(crate) async fn table_names(api: &Api, slug: &str) -> Result<(String, Vec<St
     let sql = if database.kind == "postgres" {
         "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name"
     } else {
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        // `sqlite_%` only hides the autoindexes. A virtual table brings its
+        // own shadow tables (logs_data, logs_idx, …) which are storage, not
+        // data — webo's own database showed 17 tables for 12, and the shadows
+        // were browsable as if they meant something.
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+         AND name NOT IN (SELECT name FROM pragma_table_list WHERE type='shadow') ORDER BY name"
     };
     let out = run_sql(api, slug, sql, false).await?;
     let parsed = db::parse_table_output(&out, 500);

@@ -10,11 +10,29 @@ pub const SECRET_NAMES: [&str; 3] = ["WEBO_DEPLOY_TOKEN", "TS_OAUTH_CLIENT_ID", 
 pub enum Template {
     Rails,
     Next,
+    /// The repository builds itself: webo adds the workflow and the compose
+    /// files and stays out of the way.
+    Docker,
 }
 
 /// Detect the template from repo files: a Gemfile that mentions rails, or a
-/// package.json with next in the dependencies.
-pub fn detect(gemfile: Option<&str>, package_json: Option<&str>) -> Option<Template> {
+/// package.json with next in the dependencies — and, failing both, a
+/// Dockerfile.
+///
+/// A repository that brings its own Dockerfile has already answered the only
+/// question the templates exist to answer: how to build this thing. webo then
+/// contributes what it always contributes — the workflow and the compose
+/// files — and builds what the repo says. This is what lets a monorepo, or any
+/// stack webo has no template for, be deployed at all.
+///
+/// The named stacks win when both apply: an app webo recognises keeps its
+/// identity in the panel, and `plan` never overwrites a Dockerfile that is
+/// already there.
+pub fn detect(
+    gemfile: Option<&str>,
+    package_json: Option<&str>,
+    has_dockerfile: bool,
+) -> Option<Template> {
     if gemfile.is_some_and(|g| g.contains("rails")) {
         return Some(Template::Rails);
     }
@@ -26,6 +44,9 @@ pub fn detect(gemfile: Option<&str>, package_json: Option<&str>) -> Option<Templ
                 }
             }
         }
+    }
+    if has_dockerfile {
+        return Some(Template::Docker);
     }
     None
 }
@@ -98,10 +119,20 @@ pub fn plan(
             include_str!("../templates/next/docker-compose.yml"),
             include_str!("../templates/next/docker-compose.homelab.yml"),
         ),
+        // There is no Dockerfile to offer here: this template exists precisely
+        // because the repository has one. The empty string is never written —
+        // `has_dockerfile` is true by construction for this template.
+        Template::Docker => (
+            "",
+            include_str!("../templates/docker/deploy.yml"),
+            include_str!("../templates/docker/docker-compose.yml"),
+            include_str!("../templates/docker/docker-compose.homelab.yml"),
+        ),
     };
     let tech = match template {
         Template::Rails => "ruby",
         Template::Next => "next",
+        Template::Docker => "docker",
     };
     let render = |text: &str| {
         text.replace("{{slug}}", slug)
@@ -112,7 +143,7 @@ pub fn plan(
             .replace("{{ruby}}", ruby)
     };
     let mut files = Vec::new();
-    if !has_dockerfile {
+    if !has_dockerfile && !matches!(template, Template::Docker) {
         files.push(PlanFile { path: "Dockerfile".into(), content: render(dockerfile) });
     }
     files.push(PlanFile { path: ".github/workflows/deploy.yml".into(), content: render(workflow) });
@@ -131,30 +162,64 @@ mod tests {
     #[test]
     fn detect_finds_rails_in_gemfile() {
         let gemfile = "source \"https://rubygems.org\"\ngem \"rails\", \"~> 8.0.2\"\n";
-        assert_eq!(detect(Some(gemfile), None), Some(Template::Rails));
+        assert_eq!(detect(Some(gemfile), None, false), Some(Template::Rails));
     }
 
     #[test]
     fn detect_finds_next_in_package_json() {
         let pkg = r#"{"dependencies": {"next": "15.1.0", "react": "19.0.0"}}"#;
-        assert_eq!(detect(None, Some(pkg)), Some(Template::Next));
+        assert_eq!(detect(None, Some(pkg), false), Some(Template::Next));
         let dev = r#"{"devDependencies": {"next": "15.1.0"}}"#;
-        assert_eq!(detect(None, Some(dev)), Some(Template::Next));
+        assert_eq!(detect(None, Some(dev), false), Some(Template::Next));
+    }
+
+    /// A repository webo has no template for, but that builds itself, is
+    /// deployable: this is what makes a monorepo — or any stack we never wrote
+    /// a template for — reachable at all.
+    #[test]
+    fn a_repo_that_brings_its_own_dockerfile_is_deployable() {
+        // a workspace root: no rails, no next, nothing recognisable
+        let monorepo = r#"{"workspaces": ["packages/web"], "dependencies": {"mongodb": "6"}}"#;
+        assert_eq!(detect(None, Some(monorepo), false), None, "without a Dockerfile there is nothing to build");
+        assert_eq!(detect(None, Some(monorepo), true), Some(Template::Docker));
+        assert_eq!(detect(None, None, true), Some(Template::Docker), "no manifests at all is fine too");
+
+        // a stack we DO recognise keeps its identity, Dockerfile or not
+        assert_eq!(detect(Some("gem \"rails\""), None, true), Some(Template::Rails));
+        assert_eq!(
+            detect(None, Some(r#"{"dependencies": {"next": "15"}}"#), true),
+            Some(Template::Next)
+        );
+
+        // and the plan never writes over the Dockerfile the repo brought
+        let files = plan(Template::Docker, "app", "me", "app", "main", true, "");
+        assert!(!files.iter().any(|f| f.path == "Dockerfile"), "webo must not touch it");
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&".github/workflows/deploy.yml"), "{paths:?}");
+        assert!(paths.contains(&"deploy/docker-compose.yml"), "{paths:?}");
+        assert!(paths.contains(&"deploy/docker-compose.homelab.yml"), "{paths:?}");
+        // the compose has to say where the tunnel will look for the app
+        let compose = files.iter().find(|f| f.path == "deploy/docker-compose.yml").unwrap();
+        assert!(compose.content.contains("PORT=3000"), "{}", compose.content);
+        assert!(compose.content.contains("name: app"));
+        let homelab = files.iter().find(|f| f.path.ends_with("homelab.yml")).unwrap();
+        assert!(homelab.content.contains("webo.tech: docker"), "{}", homelab.content);
+        assert!(homelab.content.contains("ghcr.io/me/app:latest"), "{}", homelab.content);
     }
 
     #[test]
     fn detect_rejects_everything_else() {
-        assert_eq!(detect(None, None), None);
-        assert_eq!(detect(Some("gem \"sinatra\""), None), None);
-        assert_eq!(detect(None, Some(r#"{"dependencies": {"react": "19"}}"#)), None);
-        assert_eq!(detect(None, Some("not json")), None);
+        assert_eq!(detect(None, None, false), None);
+        assert_eq!(detect(Some("gem \"sinatra\""), None, false), None);
+        assert_eq!(detect(None, Some(r#"{"dependencies": {"react": "19"}}"#), false), None);
+        assert_eq!(detect(None, Some("not json"), false), None);
     }
 
     #[test]
     fn rails_beats_next_when_both_exist() {
         let gemfile = "gem \"rails\"";
         let pkg = r#"{"dependencies": {"next": "15"}}"#;
-        assert_eq!(detect(Some(gemfile), Some(pkg)), Some(Template::Rails));
+        assert_eq!(detect(Some(gemfile), Some(pkg), false), Some(Template::Rails));
     }
 
     #[test]

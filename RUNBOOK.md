@@ -103,6 +103,25 @@ by name.
   kept. webo mounts that volume at `/backups`, so listing and downloading are
   plain file reads.
 
+## Repositories with their own Dockerfile
+
+A repository that carries a `Dockerfile` is deployable even when webo has no
+template for its stack: webo contributes the workflow and the compose files and
+builds what the repo says. That is what makes a monorepo — or anything that is
+neither Rails nor Next — reachable at all.
+
+Two things such an image has to honour:
+
+- **Serve on port 3000.** The tunnel routes every app to `<slug>:3000` on the
+  shared network; the port is not configurable per project today.
+- **Bind 0.0.0.0, not localhost.** A server listening on loopback inside a
+  container is unreachable from the tunnel, and the symptom is a 502 with the
+  container looking perfectly healthy.
+
+Rails and Next are still detected first, so an app webo recognises keeps its
+identity in the panel — and a Dockerfile already in the repo is never
+overwritten, whichever template applies.
+
 ## Rails apps, specifically
 
 Four things had to be fixed before a Rails app could deploy at all, and they are

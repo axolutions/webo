@@ -1474,8 +1474,10 @@ async fn create_project(api: &Api, params: &Value) -> Result<Value, String> {
     match crate::server::do_create_project(api, req).await {
         Err((_, msg)) => Err(msg),
         Ok(v) if v["supported"] == false => Ok(text(format!(
-            "{owner}/{name} is {lang} — webo has no template for it yet, so it cannot be deployed \
-             from here. Rails and Next.js are supported today.",
+            "{owner}/{name} is {lang} — webo has no template for it, and the repository has no \
+             Dockerfile of its own, so there is nothing here that says how to build it. Rails and \
+             Next.js are detected automatically; anything else deploys by adding a Dockerfile that \
+             serves on port 3000.",
             lang = v["language"].as_str().unwrap_or("an unsupported stack")
         ))),
         Ok(v) => {

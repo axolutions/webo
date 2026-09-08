@@ -164,20 +164,73 @@ impl Cloudflare {
         Ok(())
     }
 
-    /// Points a hostname of the apps zone at the tunnel. Returns Ok(()) when
-    /// the record already exists.
+    /// Points a hostname of the apps zone at this tunnel, creating the record
+    /// or repointing one that already exists.
+    ///
+    /// The "already exists" case used to be swallowed as success, which was
+    /// wrong in the one case that matters: a hostname that already resolves,
+    /// but to a DIFFERENT tunnel. Connecting it then reported success while
+    /// the domain kept answering from wherever it pointed before — a machine
+    /// that had been decommissioned, in the case that produced this fix. A
+    /// record that already points here is left alone.
     pub fn create_dns(&self, label: &str, comment: &str) -> Result<(), String> {
+        let target = self.tunnel_target();
         let body = json!({
             "type": "CNAME",
             "name": label,
-            "content": self.tunnel_target(),
+            "content": target,
             "proxied": true,
             "comment": comment,
         });
         match self.call("POST", &format!("/zones/{}/dns_records", self.zone_id), Some(&body)) {
             Ok(_) => Ok(()),
-            Err(e) if e.contains("already exists") || e.contains("81053") => Ok(()),
+            Err(e) if e.contains("already exists") || e.contains("81053") => {
+                self.repoint_dns(label, &target, comment)
+            }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Moves an existing record onto this tunnel. Anything that is not a CNAME
+    /// to a tunnel — an A record, a hostname someone parked by hand — is left
+    /// alone and reported, because overwriting it is not ours to decide.
+    fn repoint_dns(&self, label: &str, target: &str, comment: &str) -> Result<(), String> {
+        let host = self.host_for(label);
+        let list = self.call("GET", &format!("/zones/{}/dns_records?name={host}", self.zone_id), None)?;
+        let Some(rec) = list.as_array().and_then(|a| a.first()) else {
+            return Err(format!("{host} exists but could not be read back"));
+        };
+        let content = rec.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        if content == target {
+            return Ok(()); // already ours
+        }
+        let kind = rec.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if kind != "CNAME" || !content.ends_with(".cfargotunnel.com") {
+            return Err(format!(
+                "{host} already has a {kind} record pointing at {content}.                  webo only repoints records that belong to a tunnel — change or remove it first."
+            ));
+        }
+        let Some(id) = rec.get("id").and_then(|i| i.as_str()) else {
+            return Err(format!("{host} exists but has no id"));
+        };
+        let body = json!({
+            "type": "CNAME",
+            "name": label,
+            "content": target,
+            "proxied": true,
+            "comment": comment,
+        });
+        self.call("PATCH", &format!("/zones/{}/dns_records/{id}", self.zone_id), Some(&body))?;
+        Ok(())
+    }
+
+    /// The label as the zone sees it: `loja` in our own zone becomes
+    /// `loja.example.com`, and a full hostname is already what we want.
+    fn host_for(&self, label: &str) -> String {
+        if label.contains('.') {
+            label.to_string()
+        } else {
+            format!("{label}.{}", self.apps_zone)
         }
     }
 
@@ -319,6 +372,124 @@ mod tests {
         std::env::set_var("CLOUDFLARE_API_TOKEN", "  ");
         assert!(Cloudflare::from_env().is_none(), "blank counts as missing");
         for k in ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
+            std::env::remove_var(k);
+        }
+    }
+
+    /// A hostname that already exists is the interesting case, and it used to
+    /// be reported as success no matter where it pointed. This stands up a
+    /// Cloudflare that refuses the POST the way the real one does, and checks
+    /// what happens next.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connecting_a_hostname_that_already_exists_repoints_it() {
+        use axum::routing::{get, post};
+        use std::sync::{Arc, Mutex};
+
+        // what the zone currently holds, and what we did to it
+        let existing = Arc::new(Mutex::new(serde_json::json!({
+            "id": "rec1", "type": "CNAME", "content": "OTHER-TUNNEL.cfargotunnel.com"
+        })));
+        let patched: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let ex = existing.clone();
+        let pt = patched.clone();
+        let router = axum::Router::new()
+            .route(
+                "/zones/{z}/dns_records",
+                post(|| async {
+                    // the real API's answer for a host that is already taken
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(serde_json::json!({
+                            "success": false,
+                            "errors": [{ "code": 81053, "message": "An A, AAAA, or CNAME record with that host already exists." }]
+                        })),
+                    )
+                })
+                .get({
+                    let ex = ex.clone();
+                    move || {
+                        let rec = ex.lock().unwrap().clone();
+                        async move { axum::Json(serde_json::json!({ "success": true, "result": [rec] })) }
+                    }
+                }),
+            )
+            .route(
+                "/zones/{z}/dns_records/{id}",
+                axum::routing::patch({
+                    let pt = pt.clone();
+                    move |body: String| {
+                        let pt = pt.clone();
+                        async move {
+                            pt.lock().unwrap().push(serde_json::from_str(&body).unwrap());
+                            axum::Json(serde_json::json!({ "success": true, "result": {} }))
+                        }
+                    }
+                }),
+            )
+            .route("/ping", get(|| async { "ok" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let _lock = crate::testutil::env_lock();
+        std::env::set_var("WEBO_CF_API_BASE", format!("http://{addr}"));
+        for (k, v) in [
+            ("CLOUDFLARE_API_TOKEN", "t"),
+            ("CLOUDFLARE_ACCOUNT_ID", "acc"),
+            ("CLOUDFLARE_ZONE_ID", "zone"),
+            ("WEBO_TUNNEL_ID", "OURS"),
+            ("WEBO_APPS_ZONE", "example.com"),
+        ] {
+            std::env::set_var(k, v);
+        }
+        let cf = Cloudflare::from_env().unwrap();
+
+        // pointing somewhere else: it gets moved here
+        let out = tokio::task::spawn_blocking(move || {
+            let cf = Cloudflare::from_env().unwrap();
+            cf.create_dns("loja", "webo: loja")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_ok(), "{out:?}");
+        let done = patched.lock().unwrap().clone();
+        assert_eq!(done.len(), 1, "the record was not repointed");
+        assert_eq!(done[0]["content"], "OURS.cfargotunnel.com");
+        assert_eq!(done[0]["proxied"], true);
+
+        // already ours: nothing to do, and no write
+        *existing.lock().unwrap() =
+            serde_json::json!({ "id": "rec1", "type": "CNAME", "content": "OURS.cfargotunnel.com" });
+        patched.lock().unwrap().clear();
+        let out = tokio::task::spawn_blocking(move || {
+            let cf = Cloudflare::from_env().unwrap();
+            cf.create_dns("loja", "webo: loja")
+        })
+        .await
+        .unwrap();
+        assert!(out.is_ok());
+        assert!(patched.lock().unwrap().is_empty(), "a record already ours must not be rewritten");
+
+        // something that is not a tunnel record is not ours to overwrite
+        *existing.lock().unwrap() =
+            serde_json::json!({ "id": "rec1", "type": "A", "content": "203.0.113.10" });
+        let out = tokio::task::spawn_blocking(move || {
+            let cf = Cloudflare::from_env().unwrap();
+            cf.create_dns("loja", "webo: loja")
+        })
+        .await
+        .unwrap();
+        let err = out.unwrap_err();
+        assert!(err.contains("203.0.113.10"), "{err}");
+        assert!(err.contains("only repoints records that belong to a tunnel"), "{err}");
+
+        // the host is resolved against the apps zone, and a full hostname is
+        // taken as it is
+        assert_eq!(cf.host_for("loja"), "loja.example.com");
+        assert_eq!(cf.host_for("app.terceiros.com"), "app.terceiros.com");
+
+        for k in ["WEBO_CF_API_BASE", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_ZONE_ID", "WEBO_TUNNEL_ID", "WEBO_APPS_ZONE"] {
             std::env::remove_var(k);
         }
     }

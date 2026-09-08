@@ -259,6 +259,7 @@ fn tool_catalog() -> Vec<Value> {
                     "query": { "type": "string", "description": "Full-text query. Omit to see everything in the window." },
                     "level": { "type": "string", "enum": ["info", "warn", "error"], "description": "Only lines at this level." },
                     "resource": { "type": "string", "description": "Only this container, by name." },
+                    "stream": { "type": "string", "enum": ["stdout", "stderr"], "description": "Only lines the app wrote to this channel. stderr is the cheapest triage signal there is — it does not depend on guessing from the text." },
                     "window": window.clone(),
                     "limit": { "type": "integer", "description": "How many lines (default 40, max 200)." }
                 }),
@@ -676,8 +677,13 @@ async fn server_processes(api: &Api, params: &Value) -> String {
             None => "The collector has not scanned processes yet.".into(),
         };
     }
-    let cpu_sum: f32 = st.processes.iter().map(|p| p.cpu_pct).sum();
-    let mem_sum: u64 = st.processes.iter().map(|p| p.mem_bytes).sum();
+    // "Host totals" used to be the sum of the rows below, which is not the
+    // host: per-process CPU is a share of ONE core, so on 12 threads it read
+    // 20% while the machine was at 1.2% — and the same panel's server_health
+    // said 0.9%. Summed RSS double-counts shared pages the same way. The
+    // machine's own numbers answer the question the label asks.
+    let host_cpu = st.snapshot.cpu_pct;
+    let host_mem = st.snapshot.mem_used;
     let rows: Vec<String> = list
         .iter()
         .take(limit)
@@ -696,13 +702,16 @@ async fn server_processes(api: &Api, params: &Value) -> String {
             )
         })
         .collect();
+    // `groups` is what the machine has, not what survived the cut, so a
+    // reader can tell there is more than the screen shows
+    let groups = st.process_groups_total.max(total_shown);
     format!(
-        "{shown} of {groups} process groups, sorted by {sort}. Host totals: cpu {cpu_sum}, ram {mem_sum}.\n\n{rows}",
+        "{shown} of {groups} process groups, sorted by {sort}. Host: cpu {cpu}, ram {mem} used.\n\n{rows}",
         shown = rows.len(),
-        groups = total_shown,
+        groups = groups,
         sort = sort_by,
-        cpu_sum = fmt::pct(cpu_sum),
-        mem_sum = fmt::bytes(mem_sum),
+        cpu = fmt::pct(host_cpu),
+        mem = fmt::bytes(host_mem),
         rows = rows.join("\n"),
     )
 }
@@ -807,6 +816,17 @@ async fn project_status(api: Api, p: crate::store::Project, _params: Value) -> S
         if let Some(c) = &p.custom_domain {
             d.push(format!("  {c} (custom)"));
         }
+        // A project webo did not deploy itself — discovered from a running
+        // container — announces its hostname on a `webo.domain` label, which
+        // lands in `domain` and not in auto/custom. Reading only those two
+        // made two screens of the same panel disagree: the project list
+        // showed webo.axolutions.com.br while the status screen said "none",
+        // about the very domain serving the panel.
+        if d.is_empty() {
+            if let Some(label) = &p.domain {
+                d.push(format!("  {label} (declared by the container)"));
+            }
+        }
         if d.is_empty() {
             d.push("  none".into());
         }
@@ -836,12 +856,16 @@ async fn project_status(api: Api, p: crate::store::Project, _params: Value) -> S
             .map(|b| {
                 let outcome = b.conclusion.clone().unwrap_or_else(|| b.status.clone());
                 format!(
-                    "  {mark} {sha}  {dur}s  {ago}  {msg}",
+                    "  {mark} {sha}  {wf:<8}  {dur}s  {ago}  {msg}",
                     mark = if outcome == "success" { "ok  " } else { "FAIL" },
                     sha = &b.commit_sha[..7.min(b.commit_sha.len())],
+                    // A repo with CI and Deploy showed the same sha twice and
+                    // a commit that only ever ran CI read as deployed. The
+                    // workflow name is the difference, so it is on the line.
+                    wf = b.workflow.chars().take(8).collect::<String>(),
                     dur = b.duration_secs,
                     ago = fmt::ago(b.created_at, n),
-                    msg = b.commit_msg.lines().next().unwrap_or("").chars().take(60).collect::<String>(),
+                    msg = b.commit_msg.lines().next().unwrap_or("").chars().take(56).collect::<String>(),
                 )
             })
             .collect::<Vec<_>>()
@@ -981,16 +1005,20 @@ async fn project_metrics(api: Api, p: crate::store::Project, params: Value) -> S
 async fn search_logs(api: Api, p: crate::store::Project, params: Value) -> String {
     let query = arg_str(&params, "query");
     let level = arg_str(&params, "level");
+    let stream = arg_str(&params, "stream");
     let resource = arg_str(&params, "resource");
     let window = arg_str(&params, "window");
     let limit = arg_usize(&params, "limit", 40, 200);
     let n = now();
     let since = n - window_minutes(window.as_deref()) * 60;
 
-    let all = api
+    let all: Vec<crate::store::LogLine> = api
         .store
         .search_logs(p.id, query.as_deref(), resource.as_deref(), Some(since), 5000)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| stream.as_deref().is_none_or(|s| l.stream == s))
+        .collect();
     let (mut info, mut warn, mut error) = (0u64, 0u64, 0u64);
     let mut per_hour: std::collections::BTreeMap<i64, u64> = std::collections::BTreeMap::new();
     for l in &all {
@@ -1028,9 +1056,15 @@ async fn search_logs(api: Api, p: crate::store::Project, params: Value) -> Strin
         .iter()
         .map(|l| {
             format!(
-                "{ts}  {lvl:<5}  {res:<22}  {line}",
+                // The stream is collected and stored but was never shown.
+                // It is the one triage signal that does not depend on reading
+                // the text: an app writing to the error channel said so
+                // itself. A whole stderr block used to read as one error and
+                // seven infos, hiding the line that explained the bug.
+                "{ts}  {lvl:<5} {st:<3}  {res:<22}  {line}",
                 ts = fmt::clock(l.ts),
                 lvl = crate::errors::level_of(&l.line, &l.stream),
+                st = if l.stream == "stderr" { "err" } else { "out" },
                 res = l.container.chars().take(22).collect::<String>(),
                 line = l.line.chars().take(160).collect::<String>(),
             )
@@ -1092,9 +1126,10 @@ async fn tail_logs(api: Api, p: crate::store::Project, params: Value) -> String 
         .iter()
         .map(|l| {
             format!(
-                "{ts}  {lvl:<5}  {line}",
+                "{ts}  {lvl:<5} {st:<3}  {line}",
                 ts = fmt::clock(l.ts),
                 lvl = crate::errors::level_of(&l.line, &l.stream),
+                st = if l.stream == "stderr" { "err" } else { "out" },
                 line = l.line.chars().take(160).collect::<String>()
             )
         })
@@ -1114,9 +1149,30 @@ async fn list_errors(api: Api, p: crate::store::Project, params: Value) -> Strin
     let (open, resolved, ignored) = api.store.issue_counts(p.id).unwrap_or((0, 0, 0));
     let n = now();
 
+    // What the panel does NOT watch has to be said out loud. Browser errors
+    // arrive through an opt-in snippet that no project on this server has
+    // installed, so "no issues" quietly means "none from the server, and I
+    // never looked at the browser".
+    let browser_seen = api
+        .store
+        .issues(p.id, None)
+        .unwrap_or_default()
+        .iter()
+        .any(|i| i.source == "browser");
+    let blind_spot = if browser_seen {
+        String::new()
+    } else {
+        format!(
+            "\n\nThis counts server-side errors only — nothing from this project's visitors has \
+             ever arrived. Browser errors need the snippet from the panel's Errors tab pasted into \
+             {slug}'s HTML; until then a TypeError that breaks the page for a user leaves no trace here.",
+            slug = p.slug
+        )
+    };
+
     if issues.is_empty() {
         return format!(
-            "{} has no {state} issues. Totals: {open} open, {resolved} resolved, {ignored} ignored.",
+            "{} has no {state} issues. Totals: {open} open, {resolved} resolved, {ignored} ignored.{blind_spot}",
             p.slug
         );
     }
@@ -1138,11 +1194,12 @@ async fn list_errors(api: Api, p: crate::store::Project, params: Value) -> Strin
         .collect();
     format!(
         "{slug} · {shown} {state} issues (totals: {open} open, {resolved} resolved, {ignored} ignored)\n\
-         Grouped by cause; call error_detail with an id for the stack trace.\n\n{rows}",
+         Grouped by cause; call error_detail with an id for the stack trace.\n\n{rows}{blind_spot}",
         slug = p.slug,
         shown = rows.len(),
         state = state,
         rows = rows.join("\n\n"),
+        blind_spot = blind_spot,
     )
 }
 
@@ -1228,11 +1285,19 @@ async fn db_info(api: Api, p: crate::store::Project, _params: Value) -> String {
     if tables.is_empty() {
         return format!("{head}\n\nNo tables yet.");
     }
-    // one pass for estimated counts; exact counts would scan every table
+    // one pass for counts. Postgres estimates (a real count scans the table);
+    // SQLite counts for real, because there it is cheap and exact.
     let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut db_size: Option<String> = None;
     if db.kind == "postgres" {
+        // qualified by schema: the table list comes from `public`, and an
+        // unqualified relname would happily borrow the count of a table with
+        // the same name in another schema
         if let Ok(out) = crate::server::run_sql(
-            &api, &p.slug, "SELECT relname, n_live_tup FROM pg_stat_user_tables", false,
+            &api,
+            &p.slug,
+            "SELECT relname, n_live_tup FROM pg_stat_user_tables WHERE schemaname = 'public'",
+            false,
         ).await {
             for row in crate::db::parse_table_output(&out, 500).rows {
                 if let (Some(name), Some(n)) = (row.first(), row.get(1)) {
@@ -1240,18 +1305,62 @@ async fn db_info(api: Api, p: crate::store::Project, _params: Value) -> String {
                 }
             }
         }
+        // the size of the DATA, which is not the size of the volume around it
+        if let Ok(out) = crate::server::run_sql(
+            &api, &p.slug, "SELECT pg_size_pretty(pg_database_size(current_database()))", false,
+        ).await {
+            db_size = crate::db::parse_table_output(&out, 5).rows.first().and_then(|r| r.first().cloned());
+        }
+    } else {
+        // SQLite: page_count * page_size is the file, and count(*) is exact
+        if let Ok(out) = crate::server::run_sql(
+            &api, &p.slug, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()", false,
+        ).await {
+            db_size = crate::db::parse_table_output(&out, 5)
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(fmt::bytes);
+        }
+        let counting: Vec<String> = tables
+            .iter()
+            .filter(|t| crate::server::ident_ok(t))
+            .map(|t| format!("SELECT '{t}', count(*) FROM \"{t}\""))
+            .collect();
+        if !counting.is_empty() {
+            if let Ok(out) = crate::server::run_sql(&api, &p.slug, &counting.join(" UNION ALL "), false).await {
+                for row in crate::db::parse_table_output(&out, 500).rows {
+                    if let (Some(name), Some(n)) = (row.first(), row.get(1)) {
+                        counts.insert(name.clone(), n.trim().parse().unwrap_or(0));
+                    }
+                }
+            }
+        }
     }
+    let exact = db.kind != "postgres";
     let rows: Vec<String> = tables
         .iter()
         .map(|t| match counts.get(t) {
+            Some(n) if exact => format!("  {t:<28} {n} rows"),
             Some(n) => format!("  {t:<28} ~{n} rows"),
             None => format!("  {t}"),
         })
         .collect();
     format!(
-        "{head}\n\n{n} tables{est}:\n{rows}\n\nUse db_rows to look at one, or db_query for anything else.",
+        "{head}{size}\n\n{n} tables{est}:\n{rows}\n\nUse db_rows to look at one, or db_query for anything else.",
+        // the data's own size — the footprint on the project screen is the
+        // volume around it, which can be six times bigger and reads as if it
+        // were the database
+        size = db_size.map(|s| format!("\ndata {s}")).unwrap_or_default(),
         n = tables.len(),
-        est = if counts.is_empty() { "" } else { " (counts are estimates)" },
+        est = if counts.is_empty() {
+            ""
+        } else if exact {
+            ""
+        } else {
+            " (counts are estimates)"
+        },
         rows = rows.join("\n"),
     )
 }
@@ -1993,6 +2102,43 @@ mod tests {
         assert!(text.lines().count() < 30, "the answer stays small: {} lines", text.lines().count());
     }
 
+    /// The panel used to say "no issues" for a project whose visitors it
+    /// never watched. Absence of a signal is not absence of the problem.
+    #[tokio::test]
+    async fn a_project_with_no_browser_reports_says_so() {
+        let api = crate::server::tests::api_with_data();
+        let text = tool_text(api.clone(), "list_errors", json!({ "slug": "codo" })).await;
+        assert!(text.contains("server-side errors only"), "{text}");
+        assert!(text.contains("snippet"), "it says how to fix the blind spot: {text}");
+    }
+
+    /// Which channel a line came out of is stored and was never shown — and
+    /// it is the one triage signal that does not depend on reading the text.
+    #[tokio::test]
+    async fn log_lines_say_which_channel_they_came_from() {
+        let api = crate::server::tests::api_with_data();
+        let id = api.store.project_by_slug("codo").unwrap().unwrap().id;
+        let t = now();
+        api.store
+            .insert_logs(id, &[
+                crate::store::LogLine { ts: t - 60, container: "codo".into(), stream: "stdout".into(), line: "GET / 200".into() },
+                crate::store::LogLine { ts: t - 30, container: "codo".into(), stream: "stderr".into(), line: "could not open /app/data".into() },
+            ])
+            .unwrap();
+        let text = tool_text(api.clone(), "search_logs", json!({ "slug": "codo", "window": "7d" })).await;
+        assert!(text.contains(" err ") || text.contains(" out "), "{text}");
+
+        // and it filters, so "what did this app write to stderr" is one call
+        let only_err = tool_text(
+            api.clone(),
+            "search_logs",
+            json!({ "slug": "codo", "window": "7d", "stream": "stderr" }),
+        )
+        .await;
+        assert!(only_err.contains("/app/data"), "the stderr line is there: {only_err}");
+        assert!(!only_err.contains("GET / 200"), "stdout must not survive the filter: {only_err}");
+    }
+
     #[tokio::test]
     async fn logs_carry_counts_the_busiest_hour_and_respect_the_level() {
         let api = crate::server::tests::api_with_data();
@@ -2069,7 +2215,15 @@ mod tests {
         let text = tool_text(api.clone(), "server_processes", json!({})).await;
         assert!(text.contains("codo"), "{text}");
         assert!(text.contains("sorted by cpu"), "{text}");
-        assert!(text.contains("Host totals"), "{text}");
+        // the header reports the machine, not the sum of the rows: summing
+        // per-core percentages said 20% on a host idling at 1.2%
+        assert!(text.contains("Host: cpu"), "{text}");
+        let st = api.state.read().await;
+        assert!(
+            text.contains(&crate::fmt::pct(st.snapshot.cpu_pct)),
+            "the header has to be the machine's own number: {text}"
+        );
+        drop(st);
 
         let filtered =
             tool_text(api, "server_processes", json!({ "filter": "nothing-matches-this" })).await;

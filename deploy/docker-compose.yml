@@ -17,7 +17,11 @@ services:
       - webo-data:/data                                # project metadata (SQLite)
       - webo-backups:/backups                          # database dumps (shared with the pg_dump helpers)
       - /var/run/docker.sock:/var/run/docker.sock:ro   # project discovery + container metrics (optional)
-      - /proc/net/dev:/host/proc_net_dev:ro            # host network rates (optional)
+      # Bind-mounting /proc/net/dev gives the CONTAINER's network namespace —
+      # webo saw its own lo and eth0 and reported those as the machine's
+      # traffic. /proc/1/net/dev is the host's init process, so it carries the
+      # host's interfaces; mounting /proc is what makes that path reachable.
+      - /proc:/host/proc:ro                            # host network rates (optional)
       - /sys:/sys:ro                                   # temperature and battery (optional)
       - /etc/hostname:/host/etc/hostname:ro            # real host name (optional)
       - /etc/os-release:/host/etc/os-release:ro        # real host OS (optional)

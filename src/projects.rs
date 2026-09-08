@@ -236,8 +236,17 @@ pub async fn run(state: Arc<RwLock<State>>, store: Arc<Store>, sample_secs: u64)
                 .as_ref()
                 .map(|ms| {
                     ms.iter()
-                        .filter_map(|m| m.name.as_ref())
-                        .filter_map(|n| volume_sizes.get(n))
+                        .filter_map(|m| {
+                            // A bind mount has no name, and `docker df` only
+                            // knows named volumes — so bound data counted as
+                            // zero, and a project keeping its database in one
+                            // showed "volumes 0 B" for 14 MB on disk.
+                            match (m.name.as_deref(), m.source.as_deref()) {
+                                (Some(n), _) if !n.is_empty() => volume_sizes.get(n).copied(),
+                                (_, Some(src)) if !src.is_empty() => dir_size(src),
+                                _ => None,
+                            }
+                        })
                         .sum::<u64>()
                 })
                 .unwrap_or(0);
@@ -392,8 +401,50 @@ pub async fn teardown(compose_project: &str, opts: TeardownOpts) -> TeardownRepo
     report
 }
 
+/// Bytes under a directory on the host, for bind mounts. Walks it rather than
+/// shelling out to `du`: the tree is small (a project's data), and a failure
+/// to read is simply nothing, never a wrong number.
+fn dir_size(path: &str) -> Option<u64> {
+    fn walk(p: &std::path::Path, depth: usize) -> u64 {
+        if depth > 12 {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(p) else { return 0 };
+        entries
+            .flatten()
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&e.path(), depth + 1),
+                Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                _ => 0,
+            })
+            .sum()
+    }
+    let p = std::path::Path::new(path);
+    if !p.is_dir() {
+        return None;
+    }
+    Some(walk(p, 0))
+}
+
 #[cfg(test)]
 mod tests {
+    /// A bind mount weighs what its directory weighs — the number `docker df`
+    /// cannot give, because it only knows named volumes.
+    #[test]
+    fn a_bound_directory_is_measured_on_the_host() {
+        let base = std::env::temp_dir().join(format!("webo-dirsize-{}", std::process::id()));
+        let nested = base.join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(base.join("one"), vec![0u8; 1000]).unwrap();
+        std::fs::write(nested.join("two"), vec![0u8; 2345]).unwrap();
+
+        assert_eq!(super::dir_size(base.to_str().unwrap()), Some(3345), "files at every depth count");
+        assert_eq!(super::dir_size("/definitely/not/here"), None);
+        // a file is not a directory to walk
+        assert_eq!(super::dir_size(base.join("one").to_str().unwrap()), None);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     use super::*;
 
     #[test]

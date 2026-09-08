@@ -544,40 +544,63 @@ impl Store {
     ) -> rusqlite::Result<Vec<LogLine>> {
         let conn = self.conn.lock().unwrap();
         let query = query.and_then(Self::fts_query);
+        // Every filter belongs in the SQL. They used to run in Rust, after a
+        // LIMIT 5000 — so a chatty sibling container could eat the whole
+        // budget and make the container you asked for look silent, and the
+        // count you were shown was the truncated one, with no sign of it.
         let mut sql = String::from(
             "SELECT CAST(ts AS INTEGER) AS t, container, stream, line FROM logs WHERE project_id = ?1",
         );
-        if query.is_some() {
-            sql.push_str(" AND logs MATCH ?2");
-        }
-        let mut out = Vec::new();
-        let filter_container = container.map(|c| c.to_string());
-        let since = since.unwrap_or(0);
-        sql.push_str(" ORDER BY t DESC LIMIT 5000");
-        let mut stmt = conn.prepare(&sql)?;
-        let mut push = |rows: rusqlite::MappedRows<'_, _>| -> rusqlite::Result<()> {
-            for row in rows {
-                let l: LogLine = row?;
-                if l.ts < since {
-                    continue;
-                }
-                if filter_container.as_ref().is_some_and(|c| &l.container != c) {
-                    continue;
-                }
-                if out.len() < limit {
-                    out.push(l);
-                }
-            }
-            Ok(())
+        // placeholders are numbered as they are added: which clauses exist
+        // varies per call, so a fixed number would shift under the query
+        let mut n = 1;
+        let mut next = || {
+            n += 1;
+            n
         };
+        if query.is_some() {
+            sql.push_str(&format!(" AND logs MATCH ?{}", next()));
+        }
+        if since.is_some() {
+            sql.push_str(&format!(" AND CAST(ts AS INTEGER) >= ?{}", next()));
+        }
+        if container.is_some() {
+            sql.push_str(&format!(" AND container = ?{}", next()));
+        }
+        sql.push_str(" ORDER BY t DESC LIMIT ?limit");
+        let sql = sql.replace("?limit", &limit.to_string());
+        let mut stmt = conn.prepare(&sql)?;
         let map = |r: &rusqlite::Row| {
             Ok(LogLine { ts: r.get(0)?, container: r.get(1)?, stream: r.get(2)?, line: r.get(3)? })
         };
-        match query.as_deref() {
-            Some(q) => push(stmt.query_map(params![project_id, q], map)?)?,
-            None => push(stmt.query_map(params![project_id], map)?)?,
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(project_id)];
+        if let Some(q) = query.as_deref() {
+            binds.push(Box::new(q.to_string()));
         }
-        Ok(out)
+        if let Some(s) = since {
+            binds.push(Box::new(s));
+        }
+        if let Some(c) = container {
+            binds.push(Box::new(c.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), map)?;
+        rows.collect()
+    }
+
+    /// The lines already stored for a container at one exact second.
+    ///
+    /// The collection cursor has one-second resolution, so a re-read has to
+    /// look at that second again and skip what it already has — otherwise
+    /// everything a busy app wrote after the first line of a second is lost
+    /// for good.
+    pub fn lines_at(&self, project_id: i64, container: &str, ts: i64) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT line FROM logs WHERE project_id = ?1 AND container = ?2 AND CAST(ts AS INTEGER) = ?3",
+        )?;
+        let rows = stmt.query_map(params![project_id, container, ts], |r| r.get(0))?;
+        rows.collect()
     }
 
     /// Bytes a project's logs occupy, and pruning of the oldest lines above

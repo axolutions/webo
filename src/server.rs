@@ -301,7 +301,7 @@ fn scan_repo(token: &str, owner: &str, name: &str) -> Option<RepoScan> {
     Some(RepoScan {
         branch: info.default_branch,
         language: info.language,
-        template: scaffold::detect(gemfile.as_deref(), package_json.as_deref()),
+        template: scaffold::detect(gemfile.as_deref(), package_json.as_deref(), has_dockerfile),
         has_dockerfile,
         ruby: scaffold::ruby_version(ruby_file.as_deref(), gemfile.as_deref()),
     })
@@ -355,6 +355,7 @@ pub(crate) async fn do_create_project(
     let tech = match template {
         scaffold::Template::Rails => "ruby",
         scaffold::Template::Next => "next",
+        scaffold::Template::Docker => "docker",
     };
     let slug = projects::slug_for(&name);
     let now = now_secs();
@@ -472,6 +473,7 @@ pub(crate) async fn do_provision(
             let label = match template {
                 scaffold::Template::Rails => "rails",
                 scaffold::Template::Next => "next",
+                scaffold::Template::Docker => "dockerfile",
             };
             // Secrets FIRST: the commit triggers the workflow immediately, and a
             // job reads its secrets at start — writing them after would race.

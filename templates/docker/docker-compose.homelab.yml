@@ -1,0 +1,16 @@
+# Homelab override — GHCR image, shared network with the tunnel.
+services:
+  {{slug}}:
+    image: ghcr.io/{{owner}}/{{repo}}:latest
+    container_name: {{slug}}
+    labels:
+      webo.tech: {{tech}}
+    env_file:
+      - path: .env
+        required: false
+    networks:
+      - homelab
+
+networks:
+  homelab:
+    external: true

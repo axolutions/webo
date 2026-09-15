@@ -36,6 +36,9 @@ simply disappear.
 Nothing is UI-only: everything the panel shows comes from these endpoints —
 they are how an MCP server (or any automation) sees the machine.
 
+The full reference — authentication, the 19 MCP tools, and what an agent is
+allowed to change — is in [`docs/`](docs/).
+
 ## Configuration
 
 | Env | Default | What |

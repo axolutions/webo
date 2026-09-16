@@ -1,6 +1,6 @@
 ---
 name: webo
-description: The Axolutions server (webo.axolutions.com.br) — projects, deploys, logs, errors, databases and machine health. Use when the user asks whether something is up or down, why a deploy failed, what an app is logging or erroring, how much CPU/memory/disk anything is using, to query a project's database, to deploy a repository, or to set up webo access. Nothing runs locally: everything is an HTTP call to the server.
+description: The Axolutions server (webo.axolutions.com.br) — projects, deploys, logs, errors, databases and machine health. Use when the user asks whether something is up or down, why a deploy failed, what an app is logging or erroring, how much CPU/memory/disk anything is using, to query a project's database, to deploy a repository, or to set up webo access. Nothing runs locally — everything is an HTTP call to the server.
 ---
 
 # webo — the server, from here (remote)

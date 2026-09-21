@@ -9,9 +9,15 @@ services:
     ports:
       - "5050:5050"
     pid: host                # host processes and CPU/memory, not the container's
-    restart: unless-stopped
+    # `always`, not `unless-stopped`: a panel that watches the machine has to
+    # come back after a reboot even if someone stopped it by hand days ago —
+    # which is exactly how it stayed down for three days without anyone
+    # noticing, because the thing that reports outages was the outage.
+    restart: always
     environment:
-      - WEBO_NET_DEV=/host/proc_net_dev
+      # The host init's view of the interfaces. Reading /proc/net/dev from
+      # inside a container gives the container's own namespace instead.
+      - WEBO_NET_DEV=/host/proc/1/net/dev
       - WEBO_DB_PATH=/data/webo.db
     volumes:
       - webo-data:/data                                # project metadata (SQLite)

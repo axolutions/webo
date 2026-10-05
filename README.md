@@ -60,4 +60,6 @@ Cloudflare Access, or a VPN/private network in front of it.
 
 ## License
 
-MIT
+[MIT](LICENSE)
+
+Built by [Axolutions](https://www.axolutions.com.br), a Brazilian software company that builds websites, systems, apps and AI agents, and publishes part of its tooling as open source at [github.com/axolutions](https://github.com/axolutions).

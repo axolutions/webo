@@ -21,6 +21,29 @@ services:
       # -4`); without it the default keeps the port on loopback, reachable
       # from the server itself and nowhere else.
       - "${WEBO_TAILSCALE_IP:-127.0.0.1}:5051:5051"
+    # The image's healthcheck asks localhost, which only proves the process is
+    # alive. It reported "healthy" while the panel answered 502 to the world:
+    # the container had come back attached to no network at all, so the tunnel
+    # could not reach it, and nothing in Docker called that a problem.
+    #
+    # So this one also requires an address on the shared network. Asking for
+    # itself BY NAME does not work — a container resolves its own hostname
+    # through /etc/hosts and answers itself with no network whatsoever, which
+    # is how the first version of this check passed the very outage it was
+    # written for. `hostname -I` is empty when the container is attached to
+    # nothing, which is exactly the state that broke the site.
+    #
+    # The public domain is deliberately not used: an internet outage would
+    # then mark a perfectly working panel as sick. Watching from outside is an
+    # external monitor's job, and it cannot be done from in here.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fs http://localhost:5050/healthz >/dev/null && [ -n "$(hostname -I | tr -d '[:space:]')" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     networks:
       - homelab
 

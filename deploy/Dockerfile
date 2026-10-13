@@ -9,6 +9,7 @@ COPY src src
 COPY web web
 COPY templates templates
 COPY RUNBOOK.md RUNBOOK.md
+COPY docs docs
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS build
@@ -19,6 +20,7 @@ COPY src src
 COPY web web
 COPY templates templates
 COPY RUNBOOK.md RUNBOOK.md
+COPY docs docs
 RUN cargo build --release
 
 FROM debian:trixie-slim

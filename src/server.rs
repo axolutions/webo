@@ -56,7 +56,8 @@ pub fn app(api: Api) -> Router {
         .route("/api/v1/docker", get(docker_info))
         .route("/api/v1/ingest/{key}", axum::routing::post(ingest_error).options(ingest_preflight))
         .route("/api/v1/github/repos", get(github_repos))
-        .route("/mcp", axum::routing::post(crate::mcp::rpc))
+        .route("/mcp", get(crate::onboarding::mcp_get).post(crate::mcp::rpc))
+        .route("/skill.md", get(crate::onboarding::skill))
         // login and authorization
         .route("/api/config", get(config))
         .route("/api/team", get(team))
@@ -1224,6 +1225,7 @@ async fn project_errors(
     AxumState(api): AxumState<Api>,
     AxumPath(slug): AxumPath<String>,
     Query(q): Query<ErrorsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
@@ -1245,7 +1247,7 @@ async fn project_errors(
         .collect();
     let (open, resolved, ignored) = api.store.issue_counts(p.id).unwrap_or((0, 0, 0));
     let key = api.store.ingest_key(p.id).unwrap_or_default();
-    let base = std::env::var("WEBO_PUBLIC_URL").unwrap_or_else(|_| "https://webo.axolutions.com.br".into());
+    let base = crate::onboarding::instance(&headers).base;
     Json(serde_json::json!({
         "issues": issues,
         "counts": { "open": open, "resolved": resolved, "ignored": ignored },
@@ -1729,6 +1731,38 @@ pub(crate) mod tests {
         // with no allowlist at all, Clerk decides alone and the token works
         let (api, token) = locked_api(None);
         assert_eq!(call(api, "GET", "/api/v1/projects", Some(&token)).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_install_guide_and_skill_are_open_but_the_mcp_is_not() {
+        let _env = crate::testutil::env_lock();
+        std::env::remove_var("WEBO_PUBLIC_URL");
+        std::env::remove_var("WEBO_NAME");
+        let (api, _) = locked_api(Some(vec!["murilo@example.com"]));
+        let get = |path: &str, accept: Option<&str>| {
+            let mut req = Request::builder().method("GET").uri(path).header("host", "ops.example.com");
+            if let Some(a) = accept {
+                req = req.header("accept", a);
+            }
+            app(api.clone()).oneshot(req.body(Body::empty()).unwrap())
+        };
+
+        let res = get("/mcp", None).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers()["content-type"].to_str().unwrap().starts_with("text/markdown"));
+        let body = String::from_utf8(to_bytes(res.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        assert!(body.contains("https://ops.example.com/api/device/start"));
+
+        let res = get("/skill.md", None).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = String::from_utf8(to_bytes(res.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        assert!(body.contains("https://ops.example.com/mcp"));
+
+        let res = get("/mcp", Some("text/event-stream")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(res.headers()["allow"], "POST");
+
+        assert_eq!(call(api.clone(), "POST", "/mcp", None).await, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -3131,7 +3165,8 @@ pub(crate) async fn require_auth(
     let path = request.uri().path().to_string();
     // A CORS preflight carries no Authorization header by design — refusing it
     // would break the very ingest call it precedes.
-    if is_public(&path) || request.method() == axum::http::Method::OPTIONS {
+    let install_doc = request.method() == axum::http::Method::GET && matches!(path.as_str(), "/mcp" | "/skill.md");
+    if is_public(&path) || install_doc || request.method() == axum::http::Method::OPTIONS {
         request.extensions_mut().insert(Viewer(None));
         return next.run(request).await;
     }

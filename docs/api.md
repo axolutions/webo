@@ -46,6 +46,8 @@ All of it needs `Authorization: Bearer <credential>` when login is on — see
 
 | path | returns |
 |---|---|
+| `GET /mcp` | install guide for agents, filled in for this server — public (`POST /mcp` is the MCP itself) |
+| `GET /skill.md` | the agent skill for this server — public |
 | `GET /api/config` | which mode the server is in — public |
 | `POST /api/device/start` | opens a device code — public |
 | `GET /api/device/poll?code=` | the token, once approved — public |

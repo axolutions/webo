@@ -1,70 +1,29 @@
 ---
-name: webo
-description: The Axolutions server (webo.axolutions.com.br) — projects, deploys, logs, errors, databases and machine health. Use when the user asks whether something is up or down, why a deploy failed, what an app is logging or erroring, how much CPU/memory/disk anything is using, to query a project's database, to deploy a repository, or to set up webo access. Nothing runs locally — everything is an HTTP call to the server.
+name: {NAME}
+description: The server at {HOST}, watched by webo — projects, deploys, logs, errors, databases and machine health. Use when the user asks whether something on {HOST} is up or down, why a deploy failed, what an app is logging or erroring, how much CPU/memory/disk anything is using, to query a project's database, to deploy a repository, or to set up access to this server. Nothing runs locally — everything is an HTTP call to the server.
 ---
 
-# webo — the server, from here (remote)
+# {NAME} — the server at {HOST}, from here
 
-webo runs the Axolutions machine: a ThinkPad acting as a small VPS, with every
-project on it deployed from GitHub and reachable through a Cloudflare Tunnel.
-You talk to it over **MCP over HTTP**. Nothing is installed on this machine.
+webo watches one server: the projects running on it, their deploys, logs,
+errors and databases, and the machine itself. You talk to it over **MCP over
+HTTP**. Nothing is installed on this machine.
 
-- Server, panel and MCP: `https://webo.axolutions.com.br`
+- Server, panel and MCP: `{BASE}`
 
 ## 1. Already configured?
 
-If `mcp__webo__*` tools (webo_server_health, webo_list_projects…) are in the
-session, skip to "How to use". Otherwise check `claude mcp list`; if webo is
-not there, run the setup.
+If `mcp__{NAME}__*` tools (server_health, list_projects…) are in the session,
+skip to "How to use". Otherwise check `claude mcp list`; if `{NAME}` is not
+there, run the setup.
 
 ## 2. Setup (once per machine)
 
-### 2.1 Authorization — a person approves in the browser
-
-```bash
-curl -s -X POST https://webo.axolutions.com.br/api/device/start
-# → { "code": "XXXX-XXXX", "authorize_path": "/authorize?code=XXXX-XXXX",
-#     "expires_in": 900, "interval": 3 }
-```
-
-Show the user, prominently:
-
-> Open **https://webo.axolutions.com.br/authorize?code=XXXX-XXXX**, sign in
-> with Google and click **authorize**. Check that the code on screen is
-> **XXXX-XXXX**.
-
-Meanwhile, poll every ~3s (the code is good for 15 minutes):
-
-```bash
-curl -s "https://webo.axolutions.com.br/api/device/poll?code=XXXX-XXXX"
-# {"status":"pending"}                                → keep waiting
-# {"status":"approved","token":"webo_…","email":"…"}  → STORE IT: shown once
-# {"status":"expired"} / {"status":"delivered"}       → start over at 2.1
-```
-
-Only an address on the server's allowlist can approve. If the user cannot sign
-in, their email has to be added on the server.
-
-### 2.2 Test the token
-
-```bash
-curl -s https://webo.axolutions.com.br/api/v1/projects -H "Authorization: Bearer webo_…"
-# 200 with the project list = working · 401 = redo 2.1
-```
-
-### 2.3 Register the MCP (user scope = every future session, any directory)
-
-```bash
-claude mcp add --scope user --transport http webo \
-  https://webo.axolutions.com.br/mcp \
-  --header "Authorization: Bearer webo_…"
-```
-
-Confirm with `claude mcp list`. **The tools only load in the next session** —
-in this one, use the HTTP API (section 5) with the same Bearer.
+Fetch `{BASE}/mcp` and follow it. It walks through the browser authorization,
+registers the MCP and installs this skill.
 
 A 401 after it worked means the token was revoked or the email came off the
-allowlist: redo 2.1.
+server's allowlist: run the setup again.
 
 ## 3. How to use
 
@@ -123,7 +82,7 @@ Conventions worth keeping:
 ## 5. HTTP API (fallback without MCP — same auth, same rules)
 
 ```bash
-BASE=https://webo.axolutions.com.br
+BASE={BASE}
 A='Authorization: Bearer webo_…'
 curl -s $BASE/api/v1/projects -H "$A"                          # every project
 curl -s $BASE/api/v1/projects/<slug> -H "$A"                   # one, in full
@@ -134,15 +93,10 @@ curl -s $BASE/mcp -H "$A" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-## 6. Install this skill globally (optional, recommended)
-
-Fetched through the GitHub API, so it keeps working if the repo ever goes
-private (`raw.githubusercontent.com` answers 404 on a private repo):
+## 6. Update this skill
 
 ```bash
-mkdir -p ~/.claude/skills/webo
-gh api repos/axolutions/webo/contents/docs/skills/webo/SKILL.md \
-  --jq '.content' | base64 -d > ~/.claude/skills/webo/SKILL.md
+curl -fsS {BASE}/skill.md -o ~/.claude/skills/{NAME}/SKILL.md
 ```
 
 One markdown file — nothing else is installed.

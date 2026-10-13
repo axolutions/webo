@@ -47,6 +47,8 @@ allowed to change — is in [`docs/`](docs/).
 | `WEBO_SAMPLE_SECS` | `15` | sampling interval |
 | `WEBO_NET_DEV` | `/proc/net/dev` | network rates source (in a container, mount the host's) |
 | `WEBO_HOSTNAME` | — | overrides the reported hostname |
+| `WEBO_PUBLIC_URL` | the request's host | public address used in the agent install guide, the skill and the browser error snippet |
+| `WEBO_NAME` | `webo` | name the MCP server and skill get in an agent; set one per server when someone uses several |
 
 The compose mounts (`/sys`, `/proc/net/dev`, `/etc/hostname`, `/etc/os-release`)
 are optional — without them webo still works and just hides the corresponding

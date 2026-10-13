@@ -1225,6 +1225,7 @@ async fn project_errors(
     AxumState(api): AxumState<Api>,
     AxumPath(slug): AxumPath<String>,
     Query(q): Query<ErrorsQuery>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let Ok(Some(p)) = api.store.project_by_slug(&slug) else {
         return err(StatusCode::NOT_FOUND, "project not found");
@@ -1246,7 +1247,7 @@ async fn project_errors(
         .collect();
     let (open, resolved, ignored) = api.store.issue_counts(p.id).unwrap_or((0, 0, 0));
     let key = api.store.ingest_key(p.id).unwrap_or_default();
-    let base = std::env::var("WEBO_PUBLIC_URL").unwrap_or_else(|_| "https://webo.axolutions.com.br".into());
+    let base = crate::onboarding::instance(&headers).base;
     Json(serde_json::json!({
         "issues": issues,
         "counts": { "open": open, "resolved": resolved, "ignored": ignored },

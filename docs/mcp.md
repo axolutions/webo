@@ -1,11 +1,12 @@
 # MCP
 
-One endpoint: `POST https://webo.axolutions.com.br/mcp`, JSON-RPC 2.0,
-protocol `2025-06-18`. Register it once:
+One endpoint: `POST https://webo.example.com/mcp`, JSON-RPC 2.0,
+protocol `2025-06-18`. `GET` on the same path answers with the install guide
+for agents (markdown, no login). Register it once:
 
 ```bash
 claude mcp add --scope user --transport http webo \
-  https://webo.axolutions.com.br/mcp --header "Authorization: Bearer webo_…"
+  https://webo.example.com/mcp --header "Authorization: Bearer webo_…"
 ```
 
 ## Tools (19)

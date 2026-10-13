@@ -38,15 +38,15 @@ removed from it stops working on the next request, with no token to hunt down.
 The "type the code on the TV" flow, in three steps:
 
 ```bash
-BASE=https://webo.axolutions.com.br
+BASE=https://webo.example.com
 
 # 1. start (public) — keep the code
 curl -s -X POST $BASE/api/device/start
 # → { "code": "XXXX-XXXX", "authorize_path": "/authorize?code=XXXX-XXXX",
 #     "expires_in": 900, "interval": 3 }
 
-# 2. a person on the team opens it, signs in with Google and clicks authorize:
-#    https://webo.axolutions.com.br/authorize?code=XXXX-XXXX
+# 2. a person on the team opens it, signs in and clicks authorize:
+#    https://webo.example.com/authorize?code=XXXX-XXXX
 #    (the token carries the approver's email, taken from that session — never
 #     from anything the agent sent)
 

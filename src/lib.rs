@@ -7,6 +7,7 @@ pub mod errors;
 pub mod fmt;
 pub mod logs;
 pub mod mcp;
+pub mod onboarding;
 pub mod metrics;
 pub mod net;
 pub mod persist;

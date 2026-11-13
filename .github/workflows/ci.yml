@@ -20,6 +20,10 @@ jobs:
           tool: cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            cli
 
       - name: Run tests with coverage
         # main.rs is the thin binary shell (bind + spawn); everything else
@@ -29,3 +33,6 @@ jobs:
             --ignore-filename-regex 'src/main\.rs' \
             --fail-under-lines 90 \
             --summary-only
+
+      - name: CLI tests
+        run: cargo test --manifest-path cli/Cargo.toml

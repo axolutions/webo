@@ -1,0 +1,14 @@
+[package]
+name = "webo"
+version = "0.1.0"
+edition = "2024"
+description = "Command line for a webo server, speaking its own MCP endpoint"
+license = "MIT"
+repository = "https://github.com/axolutions/webo"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = "3"
+
+[profile.release]
+strip = true

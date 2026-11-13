@@ -39,6 +39,9 @@ they are how an MCP server (or any automation) sees the machine.
 The full reference — authentication, the 19 MCP tools, and what an agent is
 allowed to change — is in [`docs/`](docs/).
 
+For the terminal there is a CLI in [`cli/`](cli/) that speaks the same MCP
+endpoint, one subcommand per tool (`webo projects`, `webo status <slug>`…).
+
 ## Configuration
 
 | Env | Default | What |

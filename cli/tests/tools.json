@@ -1,0 +1,617 @@
+{
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+        "tools": [
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "The whole machine in one answer: CPU, memory, disk, temperature, battery, network, uptime, how many projects are running, and what Docker is taking on disk. Call this first when asked how the server is.",
+                "inputSchema": {
+                    "properties": {},
+                    "required": [],
+                    "type": "object"
+                },
+                "name": "server_health"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "The most active process groups on the host, with CPU, memory, disk i/o and thread count. Answers 'what is eating the machine'.",
+                "inputSchema": {
+                    "properties": {
+                        "filter": {
+                            "description": "Only groups whose name or command contains this.",
+                            "type": "string"
+                        },
+                        "limit": {
+                            "description": "How many groups to return (default 12, max 40).",
+                            "type": "integer"
+                        },
+                        "sort_by": {
+                            "description": "Defaults to cpu.",
+                            "enum": [
+                                "cpu",
+                                "memory",
+                                "disk"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "name": "server_processes"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "Every project on the server: technology, whether it is up, domain, CPU and memory, open errors and the last deploy. One line each.",
+                "inputSchema": {
+                    "properties": {},
+                    "required": [],
+                    "type": "object"
+                },
+                "name": "list_projects"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "The full picture of one project: each container with uptime and restarts, disk footprint, domains, latest builds, the version running, open errors and whether it has a database. Answers 'how is X' without a follow-up call.",
+                "inputSchema": {
+                    "properties": {
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "project_status"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "CPU, memory and disk for a project over a window, already summarised: average, peak with the time it happened, and the trend. Returns a decimated sample, never the raw series.",
+                "inputSchema": {
+                    "properties": {
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "window": {
+                            "description": "Time window. 'now' is the last 15 minutes, '7d' reads the persisted samples. Defaults to 24h.",
+                            "enum": [
+                                "now",
+                                "24h",
+                                "7d"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "project_metrics"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "Full-text search over a project's indexed logs, filterable by level, resource and window. Returns the matching lines plus counts per level and the busiest hour, so a single call shows both what happened and when it started.",
+                "inputSchema": {
+                    "properties": {
+                        "level": {
+                            "description": "Only lines at this level.",
+                            "enum": [
+                                "info",
+                                "warn",
+                                "error"
+                            ],
+                            "type": "string"
+                        },
+                        "limit": {
+                            "description": "How many lines (default 40, max 200).",
+                            "type": "integer"
+                        },
+                        "query": {
+                            "description": "Full-text query. Omit to see everything in the window.",
+                            "type": "string"
+                        },
+                        "resource": {
+                            "description": "Only this container, by name.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "stream": {
+                            "description": "Only lines the app wrote to this channel. stderr is the cheapest triage signal there is \u2014 it does not depend on guessing from the text.",
+                            "enum": [
+                                "stdout",
+                                "stderr"
+                            ],
+                            "type": "string"
+                        },
+                        "window": {
+                            "description": "Time window. 'now' is the last 15 minutes, '7d' reads the persisted samples. Defaults to 24h.",
+                            "enum": [
+                                "now",
+                                "24h",
+                                "7d"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "search_logs"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "The last lines straight from a container, bypassing the index \u2014 for seeing what is happening right now, including lines the collector has not picked up yet.",
+                "inputSchema": {
+                    "properties": {
+                        "lines": {
+                            "description": "How many lines (default 40, max 200).",
+                            "type": "integer"
+                        },
+                        "resource": {
+                            "description": "Container name. Defaults to the project's app container.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "tail_logs"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "Issues grouped by cause, with occurrence count, the file to blame, first and last seen, and whether they came from the server or a visitor's browser.",
+                "inputSchema": {
+                    "properties": {
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "state": {
+                            "description": "Defaults to open.",
+                            "enum": [
+                                "open",
+                                "resolved",
+                                "ignored",
+                                "all"
+                            ],
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "list_errors"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "What database a project has (its own Postgres container, or a SQLite file found in a volume) and every table with an estimated row count. The map to read before querying.",
+                "inputSchema": {
+                    "properties": {
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "db_info"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "Browse one table with paging and ordering, without writing SQL. Cheaper and safer than db_query for the common case of looking at the data.",
+                "inputSchema": {
+                    "properties": {
+                        "descending": {
+                            "description": "Sort descending instead of ascending.",
+                            "type": "boolean"
+                        },
+                        "limit": {
+                            "description": "Rows per page (default 20, max 100).",
+                            "type": "integer"
+                        },
+                        "offset": {
+                            "description": "Rows to skip.",
+                            "type": "integer"
+                        },
+                        "order_by": {
+                            "description": "Column to sort by.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "table": {
+                            "description": "Table name, as listed by db_info.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug",
+                        "table"
+                    ],
+                    "type": "object"
+                },
+                "name": "db_rows"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Run SQL. READ-ONLY unless write:true \u2014 the Postgres session itself is opened read-only, so a stray UPDATE is refused by the database, not by a check here. Setting write:true takes a backup first and names the file in the answer, so the change is reversible.",
+                "inputSchema": {
+                    "properties": {
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "sql": {
+                            "description": "The statement to run.",
+                            "type": "string"
+                        },
+                        "write": {
+                            "description": "Allow statements that change data. A backup is taken first.",
+                            "type": "boolean"
+                        }
+                    },
+                    "required": [
+                        "slug",
+                        "sql"
+                    ],
+                    "type": "object"
+                },
+                "name": "db_query"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": true,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "List a project's database dumps, take one now, or restore one. Restoring overwrites the current data and needs confirm:true. Downloading is not offered \u2014 the answer gives the file name and size instead.",
+                "inputSchema": {
+                    "properties": {
+                        "action": {
+                            "description": "Defaults to list.",
+                            "enum": [
+                                "list",
+                                "create",
+                                "restore"
+                            ],
+                            "type": "string"
+                        },
+                        "confirm": {
+                            "description": "Required to restore: it overwrites current data.",
+                            "type": "boolean"
+                        },
+                        "file": {
+                            "description": "Which dump to restore, from the list.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "db_backup"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": true,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Resolve, ignore, reopen or delete issues, one or many at once. Ignoring silences an issue even when it happens again; resolving lets it reopen. Deleting drops the occurrences too and needs confirm:true.",
+                "inputSchema": {
+                    "properties": {
+                        "action": {
+                            "description": "What to do with them.",
+                            "enum": [
+                                "resolve",
+                                "ignore",
+                                "reopen",
+                                "delete"
+                            ],
+                            "type": "string"
+                        },
+                        "confirm": {
+                            "description": "Required to delete.",
+                            "type": "boolean"
+                        },
+                        "issue_ids": {
+                            "description": "Ids from list_errors.",
+                            "items": {
+                                "type": "integer"
+                            },
+                            "type": "array"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug",
+                        "issue_ids",
+                        "action"
+                    ],
+                    "type": "object"
+                },
+                "name": "triage_errors"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Register a GitHub repository as a project: detects the stack (Rails or Next) and the Ruby or Node version, and returns the scaffold plan. It does NOT deploy \u2014 call deploy_project after showing the plan.",
+                "inputSchema": {
+                    "properties": {
+                        "repo_name": {
+                            "description": "Repository name.",
+                            "type": "string"
+                        },
+                        "repo_owner": {
+                            "description": "GitHub owner or organisation.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "repo_owner",
+                        "repo_name"
+                    ],
+                    "type": "object"
+                },
+                "name": "create_project"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Run the first deploy of a registered project: creates the database if asked for, writes the variables, commits the scaffold and reserves the automatic domain \u2014 which starts the build on GitHub Actions. This is the call that changes the world.",
+                "inputSchema": {
+                    "properties": {
+                        "database": {
+                            "description": "managed creates a Postgres container; external takes database_url; defaults to none.",
+                            "enum": [
+                                "managed",
+                                "external",
+                                "none"
+                            ],
+                            "type": "string"
+                        },
+                        "database_url": {
+                            "description": "Required when database is external.",
+                            "type": "string"
+                        },
+                        "env": {
+                            "description": "Environment variables to write before the first deploy.",
+                            "type": "object"
+                        },
+                        "pg_version": {
+                            "description": "For a managed database. Defaults to 17.",
+                            "enum": [
+                                "17",
+                                "16",
+                                "15"
+                            ],
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project, as returned by create_project.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "deploy_project"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "List, set or remove a project's environment variables. Values are ALWAYS masked \u2014 this tool never returns a secret in clear text, by design. Setting one rewrites the app's .env on the server; it takes effect on the next deploy.",
+                "inputSchema": {
+                    "properties": {
+                        "action": {
+                            "description": "Defaults to list.",
+                            "enum": [
+                                "list",
+                                "set",
+                                "delete"
+                            ],
+                            "type": "string"
+                        },
+                        "key": {
+                            "description": "Variable name, for set and delete.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        },
+                        "value": {
+                            "description": "The value, for set.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "project_env"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": false,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Connect or disconnect a custom domain. Inside webo's own Cloudflare zone the DNS record is created automatically; elsewhere the answer says which CNAME to point. The automatic domain is never touched.",
+                "inputSchema": {
+                    "properties": {
+                        "action": {
+                            "description": "Defaults to connect.",
+                            "enum": [
+                                "connect",
+                                "disconnect"
+                            ],
+                            "type": "string"
+                        },
+                        "domain": {
+                            "description": "Hostname to connect, e.g. app.example.com.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug"
+                    ],
+                    "type": "object"
+                },
+                "name": "connect_domain"
+            },
+            {
+                "annotations": {
+                    "destructiveHint": true,
+                    "idempotentHint": false,
+                    "openWorldHint": false,
+                    "readOnlyHint": false
+                },
+                "description": "Stop and remove a project's containers. Needs confirm to equal the slug exactly. Volumes and images are NEVER removed through MCP \u2014 deleting data is a panel-only action, where a person is looking. The GitHub repository is untouched.",
+                "inputSchema": {
+                    "properties": {
+                        "confirm": {
+                            "description": "Must equal the slug, exactly as the panel makes you type it.",
+                            "type": "string"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug",
+                        "confirm"
+                    ],
+                    "type": "object"
+                },
+                "name": "delete_project"
+            },
+            {
+                "annotations": {
+                    "idempotentHint": true,
+                    "openWorldHint": false,
+                    "readOnlyHint": true
+                },
+                "description": "The occurrences of one issue with the full stack trace and where it came from. This is what makes a fix suggestable.",
+                "inputSchema": {
+                    "properties": {
+                        "issue_id": {
+                            "description": "The issue id from list_errors.",
+                            "type": "integer"
+                        },
+                        "slug": {
+                            "description": "The project slug, as listed by list_projects.",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "slug",
+                        "issue_id"
+                    ],
+                    "type": "object"
+                },
+                "name": "error_detail"
+            }
+        ]
+    }
+}

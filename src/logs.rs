@@ -7,11 +7,16 @@ use crate::store::{LogLine, Store};
 use bollard::container::{ListContainersOptions, LogsOptions};
 use bollard::Docker;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// 500 MB of lines per project, as agreed.
 pub const MAX_BYTES_PER_PROJECT: i64 = 500 * 1024 * 1024;
+
+/// How much a project may log before its size is measured again. Measuring
+/// scans every stored line, so it happens on growth, not on every pass.
+pub const PRUNE_CHECK_BYTES: i64 = 8 * 1024 * 1024;
 
 /// Docker prefixes each line with an RFC3339 timestamp when asked to.
 /// Returns (unix seconds, text) — the text keeps whatever the app wrote.
@@ -200,10 +205,82 @@ pub async fn tail(container: &str, lines: usize) -> Vec<LogLine> {
     out
 }
 
+/// Where collection stopped for each container: the newest second stored and
+/// the lines already stored at that second.
+///
+/// The logs table is FTS5, where `project_id`, `container` and `ts` are not
+/// indexed, so asking SQLite for this scans every stored line. Doing that for
+/// every container on every pass kept a core busy around the clock; the
+/// collector is the only writer, so it can remember instead and ask SQLite
+/// once per container after a restart.
+#[derive(Default)]
+pub struct Cursors {
+    seen: HashMap<(i64, String), Cursor>,
+}
+
+type Cursor = Option<(i64, Vec<String>)>;
+
+impl Cursors {
+    pub fn position(&mut self, store: &Store, project_id: i64, container: &str) -> (Option<i64>, Vec<String>) {
+        let key = (project_id, container.to_string());
+        let entry = self.seen.entry(key).or_insert_with(|| {
+            let since = store.last_log_ts(project_id, container).ok().flatten()?;
+            Some((since, store.lines_at(project_id, container, since).unwrap_or_default()))
+        });
+        match entry {
+            Some((ts, lines)) => (Some(*ts), lines.clone()),
+            None => (None, Vec::new()),
+        }
+    }
+
+    pub fn advance(&mut self, project_id: i64, container: &str, stored: &[LogLine]) {
+        let Some(newest) = stored.iter().map(|l| l.ts).max() else { return };
+        let entry = self.seen.entry((project_id, container.to_string())).or_insert(None);
+        match entry {
+            Some((ts, _)) if *ts > newest => return,
+            Some((ts, _)) if *ts == newest => {}
+            _ => *entry = Some((newest, Vec::new())),
+        }
+        if let Some((_, lines)) = entry {
+            lines.extend(stored.iter().filter(|l| l.ts == newest).map(|l| l.line.clone()));
+        }
+    }
+}
+
+pub struct PruneBudget {
+    every: i64,
+    grown: HashMap<i64, i64>,
+}
+
+impl PruneBudget {
+    pub fn new(every: i64) -> Self {
+        PruneBudget { every, grown: HashMap::new() }
+    }
+
+    pub fn add(&mut self, project_id: i64, lines: &[LogLine]) {
+        let bytes: i64 = lines.iter().map(|l| l.line.len() as i64).sum();
+        if let Some(grown) = self.grown.get_mut(&project_id) {
+            *grown += bytes;
+        }
+    }
+
+    pub fn due(&mut self, project_id: i64) -> bool {
+        match self.grown.get(&project_id) {
+            Some(grown) if *grown < self.every => false,
+            _ => {
+                self.grown.insert(project_id, 0);
+                true
+            }
+        }
+    }
+}
+
 pub async fn run(store: Arc<Store>, every_secs: u64) {
     let Ok(docker) = Docker::connect_with_unix_defaults() else { return };
     let mut tick = tokio::time::interval(Duration::from_secs(every_secs));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut cursors = Cursors::default();
+    let mut budget = PruneBudget::new(PRUNE_CHECK_BYTES);
     loop {
         tick.tick().await;
         let Ok(projects) = store.projects() else { continue };
@@ -231,12 +308,8 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     .and_then(|n| n.first())
                     .map(|n| n.trim_start_matches('/').to_string())
                     .unwrap_or_else(|| id.chars().take(12).collect());
-                let since = store.last_log_ts(p.id, &name).ok().flatten();
+                let (since, already) = cursors.position(&store, p.id, &name);
                 let fetched = fetch(&docker, &id, since).await;
-                let already = match since {
-                    Some(s) => store.lines_at(p.id, &name, s).unwrap_or_default(),
-                    None => Vec::new(),
-                };
                 let fresh = newer_than(fetched, since, &already);
                 if fresh.is_empty() {
                     continue;
@@ -245,7 +318,11 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     .into_iter()
                     .map(|(ts, stream, line)| LogLine { ts, container: name.clone(), stream, line })
                     .collect();
-                let _ = store.insert_logs(p.id, &lines);
+                if store.insert_logs(p.id, &lines).is_err() {
+                    continue;
+                }
+                cursors.advance(p.id, &name, &lines);
+                budget.add(p.id, &lines);
                 // the same lines feed error tracking, so every app gets it
                 // without installing anything; the stack frames that follow an
                 // error travel with it as one occurrence
@@ -267,7 +344,9 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
                     );
                 }
             }
-            let _ = store.prune_logs(p.id, MAX_BYTES_PER_PROJECT);
+            if budget.due(p.id) {
+                let _ = store.prune_logs(p.id, MAX_BYTES_PER_PROJECT);
+            }
         }
     }
 }
@@ -275,6 +354,62 @@ pub async fn run(store: Arc<Store>, every_secs: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(ts: i64, line: &str) -> LogLine {
+        LogLine { ts, container: "app".into(), stream: "stdout".into(), line: line.into() }
+    }
+
+    #[test]
+    fn cursors_ask_sqlite_once_per_container() {
+        let store = Store::open_in_memory().unwrap();
+        store.insert_logs(1, &[stored(100, "a"), stored(200, "b"), stored(200, "c")]).unwrap();
+        let mut cursors = Cursors::default();
+        assert_eq!(cursors.position(&store, 1, "app"), (Some(200), vec!["b".to_string(), "c".to_string()]));
+        assert_eq!(cursors.position(&store, 1, "silent"), (None, vec![]));
+
+        store.insert_logs(1, &[stored(900, "behind its back")]).unwrap();
+        let late = LogLine { ts: 50, container: "silent".into(), stream: "stdout".into(), line: "x".into() };
+        store.insert_logs(1, &[late]).unwrap();
+        assert_eq!(cursors.position(&store, 1, "app").0, Some(200), "remembered, not re-read");
+        assert_eq!(cursors.position(&store, 1, "silent").0, None, "an empty container is remembered too");
+    }
+
+    #[test]
+    fn cursors_follow_what_the_collector_stored() {
+        let store = Store::open_in_memory().unwrap();
+        let mut cursors = Cursors::default();
+        assert_eq!(cursors.position(&store, 1, "app"), (None, vec![]));
+
+        cursors.advance(1, "app", &[stored(100, "a"), stored(300, "b")]);
+        assert_eq!(cursors.position(&store, 1, "app"), (Some(300), vec!["b".to_string()]));
+
+        cursors.advance(1, "app", &[stored(300, "c")]);
+        assert_eq!(cursors.position(&store, 1, "app"), (Some(300), vec!["b".to_string(), "c".to_string()]));
+
+        cursors.advance(1, "app", &[stored(200, "late")]);
+        assert_eq!(cursors.position(&store, 1, "app").0, Some(300), "an older batch never moves it back");
+
+        cursors.advance(1, "app", &[]);
+        cursors.advance(1, "app", &[stored(400, "d")]);
+        assert_eq!(cursors.position(&store, 1, "app"), (Some(400), vec!["d".to_string()]));
+
+        cursors.advance(2, "web", &[stored(10, "first")]);
+        assert_eq!(cursors.position(&store, 2, "web"), (Some(10), vec!["first".to_string()]));
+    }
+
+    #[test]
+    fn size_is_measured_on_growth_not_every_pass() {
+        let mut budget = PruneBudget::new(10);
+        budget.add(1, &[stored(1, "ignored before the first check")]);
+        assert!(budget.due(1), "the first pass after a restart measures");
+        assert!(!budget.due(1));
+        budget.add(1, &[stored(1, "12345")]);
+        assert!(!budget.due(1));
+        budget.add(1, &[stored(1, "67890")]);
+        assert!(budget.due(1));
+        assert!(!budget.due(1));
+        assert!(budget.due(2), "each project has its own budget");
+    }
 
     #[test]
     fn docker_timestamps_are_split_from_the_text() {
